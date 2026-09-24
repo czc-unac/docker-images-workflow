@@ -2,49 +2,60 @@
 
 ## 基本信息
 - PR: #4420 — 【软件升级】ceph容器镜像升级至21.3.0版本
-- 失败类型: build-error
+- 失败类型: infra-error
 - 置信度: 高
 - 知识库匹配: 新模式
-- 新模式标题: 编译进程OOM被杀
-- 新模式症状关键词: `Killed signal terminated program cc1plus`, `fatal error`, `ninja: build stopped`, OOM, ceph, rgw_rados.cc, MemTotal
+- 新模式标题: CI工具命令缺失
+- 新模式症状关键词: FileNotFoundError, eulerpublisher, No such file or directory, subprocess
 
 ## 根因分析
 
 ### 直接错误
 ```
-#12 5766.9 [1055/1775] Building CXX object src/rgw/CMakeFiles/rgw_common.dir/driver/rados/rgw_rados.cc.o
-#12 5766.9 FAILED: [code=1] src/rgw/CMakeFiles/rgw_common.dir/driver/rados/rgw_rados.cc.o
-#12 5766.9 g++: fatal error: Killed signal terminated program cc1plus
-#12 5766.9 compilation terminated.
-#12 5777.6 ninja: build stopped: subcommand failed.
-#12 ERROR: process "... && ninja -j\"$JOBS\" && ninja install" did not complete successfully: exit code: 1
+2026-09-24 09:20:06,725-...-INFO: The image specification check for releasing on appstore has passed.
+Traceback (most recent call last):
+  File "/home/jenkins/agent-working-dir/workspace/multiarch/openeuler/aarch64/openeuler-docker-images/eulerpublisher/update/container/app/update.py", line 367, in <module>
+    if obj.check_updates():
+  File ".../eulerpublisher/update/container/app/update.py", line 256, in check_updates
+    if _check_app_image(file=file) != 0:
+  File ".../eulerpublisher/update/container/app/update.py", line 77, in _check_app_image
+    if subprocess.call([
+  File "/usr/lib64/python3.11/subprocess.py", line 389, in call
+    with Popen(*popenargs, **kwargs) as p:
+  File "/usr/lib64/python3.11/subprocess.py", line 1026, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "/usr/lib64/python3.11/subprocess.py", line 1950, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+FileNotFoundError: [Errno 2] No such file or directory: 'eulerpublisher'
+Build step 'Execute shell' marked build as failure
+Finished: FAILURE
 ```
-日志中其余 `warning`（`-Wstringop-overflow`、`-Wrestrict`、`-Wmismatched-new-delete`）均为**非致命告警**，且编译命令未使用 `-Werror`（仅 `-Werror=format-security`、`-Werror=vla`），因此**不是根因**。真正致命信号是 `g++: fatal error: Killed signal terminated program cc1plus`，即编译器进程 `cc1plus` 被内核 OOM killer 杀死，导致 `ninja` 报错退出（构建镜像的 Dockerfile 自身注释也印证了该风险：*"Ceph contains very memory-hungry translation units ... so that the compiler (cc1plus) is not OOM-killed"*）。
 
 ### 根因定位
-- 失败位置: `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile:44-55`（`RUN git clone ... && ninja -j"$JOBS" && ninja install` 步骤），OOM 发生在编译 `src/rgw/driver/rados/rgw_rados.cc` 时
-- 失败原因: 内存不足，`cc1plus` 被 OOM killer 杀死。Dockerfile 中的内存限流逻辑存在问题：它通过 `/proc/meminfo` 的 `MemTotal` 计算 `MAX_JOBS=$(( MEM_MB / 4096 ))`，而容器内 `/proc/meminfo` 默认反映的是**宿主机总量**而非容器 cgroup 内存上限，导致 `MAX_JOBS` 被高估、实际并行编译进程数超出容器可用内存，在编译 `rgw_rados.cc`（该 PR 注释自承是内存消耗极大的翻译单元）时触发 OOM。
+- 失败位置: `eulerpublisher/update/container/app/update.py:77`（`_check_app_image` 函数内的 `subprocess.call([...])`）
+- 失败原因: CI 编排工具 `eulerpublisher` 在 `check_updates()` 流程中通过 `subprocess.call(...)` 调用名为 `eulerpublisher` 的可执行文件，但该命令在构建节点的 PATH 中不存在，Python 抛出 `FileNotFoundError`，脚本以非零码退出并被 Jenkins 标记为构建失败。
 
 ### 与 PR 变更的关联
-本次失败**完全由本 PR 新增的 Dockerfile 引起**。`Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile` 为新增文件（`new_file: True`），构建在 `[6/8]` 步骤失败，失败位置正是该新增 Dockerfile 的 `ninja -j"$JOBS"` 步骤。PR 已经意识到 Ceph 编译的内存压力并加入了基于内存的并行度限制，但该限制实现不足以避免 OOM。其余变更（`entrypoint.sh`、`README.md`、`image-info.yml`、`meta.yml`）均未进入该失败步骤。
+无关。日志证据：
+1. `Difference` 列表仅列出本 PR 新增/修改的 5 个文件（`Storage/ceph/21.3.0/...`、README、image-info.yml、meta.yml），属于 CI 的正常变更识别。
+2. 紧接着日志明确输出 `The image specification check for releasing on appstore has passed.`——即本 PR 的元数据/appstore 规格预检**已通过**。
+3. 失败发生在预检通过之后、由 CI 工具自身发起的子进程调用环节，此时尚未进入任何 Docker 构建步骤（日志中无 Dockerfile 构建输出）。
+
+因此该失败与本 PR 的 Dockerfile/entrypoint.sh/元数据内容无因果关系，属于 CI 工具/运行环境问题。
 
 ## 修复方向
 
 ### 方向 1（置信度: 高）
-修正内存限流逻辑，使并行度真正匹配容器可用内存：
-- 读取容器 cgroup 内存上限（如 cgroup v2 `/sys/fs/cgroup/memory.max`，或 cgroup v1 `/sys/fs/cgroup/memory/memory.limit_in_bytes`）而非宿主机 `/proc/meminfo` 的 `MemTotal`；当读到 `max`/极大值时再回退。
-- 同时将每 job 的内存估算值调大（当前按 ~4 GiB/job 估算，而 `rgw_rados.cc`、`rgw_lc.cc` 实测需求更高），确保 `JOBS` 足够保守。
-- 可选：为 `ninja` 增加基于负载/内存的并发约束（如 `-l`、或直接使用固定较低的 `-j`），并考虑给构建阶段分配更大内存或加入 swap。
+属于 infra-error，与 PR 代码无关。Code Fixer **不应修改本 PR 的任何文件**。真正需要处理的是 CI 侧：`eulerpublisher` 包被 `pip install ./eulerpublisher` 安装后，未生成（或未暴露）名为 `eulerpublisher` 的命令行入口，或该入口所在目录（通常 `/usr/local/bin`）未包含在 job 的 PATH 中，导致工具自调用失败。应由 CI 维护方在 eulerpublisher 的 pyproject 中补充 console_scripts 入口，或在运行前把安装目录加入 PATH。
 
 ### 方向 2（可选）
-若无法可靠读取 cgroup 限制，则直接将该 RUN 步骤的 `JOBS` 固定为保守值（例如 2~4）或按经验值硬编码上限，牺牲构建时长换取构建成功率。
+若确认该入口本应由系统级安装提供，则可能是本 aarch64 构建节点环境残缺（与其他节点不一致）所致，属于基础设施配置差异，同样无需 Code Fixer 处理。
 
 ## 需要进一步确认的点
-1. 构建容器实际可用的内存上限（cgroup 限制）与宿主机内存，以及 `nproc` 的实际返回值，用以确定安全的 `JOBS`/每-job 内存阈值。
-2. 读者如需确认 `rgw_rados.cc` 的峰值内存占用，需在同等环境复现构建（本报告仅基于日志，日志已被截断，未提供 `do_cmake.sh`/configure 阶段输出，但失败的 `[6/8]` 步骤与 `[1055/1775]` 进度足以定位为编译阶段 OOM）。
-3. 是否需要针对 aarch64 与 x86-64 分别调整并行度（日志未区分架构，但两架构构建机内存可能不同）。
+- 确认 `eulerpublisher` 包的 `pyproject.toml` 是否声明了名为 `eulerpublisher` 的 `[project.scripts]` / `console_scripts` 入口点；日志中该包确实 `Successfully installed eulerpublisher-0.0.1.dev321`，因此问题更可能是入口点未注册或不在 PATH，而非包缺失。
+- 确认 job 运行环境中 `/usr/local/bin`（pip 安装 console scripts 的默认目录）是否在 PATH 中。
+- 对比同期其他 PR 在此 job（`multiarch/openeuler/aarch64/openeuler-docker-images`）上的结果：若同样失败，则确证为环境固有 infra 问题，而非本 PR 引入。
+- 注意日志中的触发信息为 `PR 4431 [unac:fix/4420 -> master]`，与上下文 PR #4420 编号不一致，建议确认触发关系（同一修复分支的来源），但不影响上述 infra-error 结论。
 
 ## 修复验证要求
-本修复不涉及 patch 第三方源文件的正则匹配，无需上游文件校验。但 code-fixer 在提交前应确认：
-- 新的内存/并行度计算方式在容器内能正确读取到 cgroup 内存上限（若非固定值方案），且计算出的 `JOBS` 至少为 1；
-- 保证 `ninja -j"$JOBS"` 在低内存构建机上不会再次触发 `cc1plus` OOM。
+不适用（本失败不涉及修改正则 patch 外部源文件，且无需 Code Fixer 修改本 PR）。
