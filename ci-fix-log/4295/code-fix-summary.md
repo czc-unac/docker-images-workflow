@@ -1,24 +1,28 @@
 # 修复摘要
 
 ## 修复的问题
-修复 3dslicer 5.12.4 镜像构建时 Slicer 主构建阶段因并行度过高导致 `cc1plus` 被 OOM 杀死的问题（`Libs/vtkITK/vtkITKGrowCut.cxx` 编译失败）。
+删除 `build-Slicer.sh` 中在 superbuild 顶层不存在的 `--target vtkITK` 构建段，解决 `gmake: *** No rule to make target 'vtkITK'. Stop.` 导致的镜像构建失败（exit code 2）。
 
 ## 修改的文件
-- `HPC/3dslicer/5.12.4/24.03-lts-sp4/build-Slicer.sh`:
-  1. 新增 `detect_memory_limit_mb()`：优先读取容器 cgroup 内存上限（cgroup v2 的 `/sys/fs/cgroup/memory.max`，cgroup v1 的 `/sys/fs/cgroup/memory/memory.limit_in_bytes`），仅在无有限上限时才回退到 `/proc/meminfo` 的 `MemTotal`。
-  2. 每编译任务预留内存由 `4096` MiB 提升为 `MEMORY_PER_JOB_MB=8192`（8 GiB），据此计算 `PARALLEL_JOBS`，并保留“不超过 CPU 核数、最小为 1”的约束。
-  3. 在预先单独构建 `VTK` 目标之后、主构建之前，新增单独以 `--parallel 2` 构建 `vtkITK` 目标，避免该重内存库与其他目标并发编译。
+- `HPC/3dslicer/5.12.4/24.03-lts-sp4/build-Slicer.sh`: 移除第二段 `cmake --build $build_dir --target vtkITK --parallel 2` 及其注释；改为在保留的默认全量构建（使用已按可用内存/CPU 计算出的 `$PARALLEL_JOBS`）中一并构建内层 `Libs/vtkITK`。仅此一处改动，其余逻辑（VTK 预构建、内存上限检测、并行度计算）保持不变。
 
 ## 修复逻辑
-分析报告指出，失败根因是主构建阶段并行度过高触发 OOM killer（`Killed signal terminated program cc1plus`），并非源码编译错误。原脚本的三处不足均已针对性修复：
+分析报告的失败点为：单独构建 `VTK` 成功后，紧接着尝试构建 `vtkITK` 目标失败。经从上游 Slicer `v5.12.4` 源码验证（`https://github.com/Slicer/Slicer` tag `v5.12.4`），根因确认为目标层级错误：
 
-- **内存被高估**：原实现用 `/proc/meminfo` 的 `MemTotal` 计算并行度，该值在构建容器内反映的是宿主机总内存，可能远大于容器 cgroup 实际限额。改为优先读取 cgroup 内存上限后，`PARALLEL_JOBS` 依据真实可用内存计算，避免超限。
-- **每任务预留内存偏低**：原按 ~4 GiB/任务估算，而 VTK/vtkITK 这类模板实例化密集的翻译单元单进程峰值可超过 4 GiB，故提升到 8 GiB。
-- **重内存目标未单独限流**：原脚本仅对 `VTK` 目标做了低并行预构建，而本次 OOM 发生在 `vtkITK` 目标。日志路径 `Libs/vtkITK/CMakeFiles/vtkITK.dir/build.make:236` 表明 `vtkITK` 属于 Slicer 主构建树（非预构建的 VTK 外部工程）。已从上游 `Slicer/Slicer` tag `v5.12.4` 获取 `Libs/vtkITK/CMakeLists.txt` 验证：其通过 `set(lib_name ${PROJECT_NAME})` + `add_library(${lib_name} ${srcs})` 定义了目标 `vtkITK`，故 `--target vtkITK` 目标名正确、可被单独构建。
+1. `CMakeLists.txt:880-883`：`if(Slicer_SUPERBUILD) include(SuperBuild.cmake); return() endif()`。顶层 superbuild 在此提前返回，**不会**执行 `add_subdirectory(Libs)`。
+2. `SuperBuild.cmake:541-548`：superbuild 只定义外部工程目标，其中内层工程名为 `Slicer`，`BINARY_DIR=${CMAKE_BINARY_DIR}/${Slicer_BINARY_INNER_SUBDIR}`，即 `/opt/Slicer-Release/Slicer-build`。
+3. `Libs/vtkITK/CMakeLists.txt`（`project(vtkITK)`）以及顶层 `CMakeLists.txt:1173 add_subdirectory(Libs)` 仅在内层构建（`Slicer_SUPERBUILD=OFF`）时生效。`vtkITK` 是 **内层 Slicer 子构建** 的目标，不在外层 superbuild 目标图中。
 
-预期效果：容器无 cgroup 限额时回退宿主机内存；有 32 GiB 限额时主构建为 `--parallel 4`（受 CPU 核数约束时更少），且 `vtkITK` 已提前以 2 路并行构建完成，主构建峰值并行编译的重内存翻译单元数量显著下降。
+因此 `cmake --build /opt/Slicer-Release --target vtkITK` 必然报 “No rule to make target 'vtkITK'”。这与分析报告“方向 3”一致（`vtkITK` 属内层 `Libs/vtkITK` 模块目标，不应在外层引用）。
+
+由于内层 `Slicer-build` 目录要等外部工程 `Slicer` 被构建时才会配置，无法在外层构建图中单独定位 `vtkITK`。最小且正确的修复是删除该非法目标段，让默认全量构建在内层完成对 `vtkITK` 的编译；OOM 防护由脚本已有的 `detect_memory_limit_mb` + `MEMORY_PER_JOB_MB=8192` 计算出的 `PARALLEL_JOBS` 提供（`cmake --build ... --parallel $PARALLEL_JOBS` 通过 GNU Make jobserver 传递到内层外部工程构建），因而无需再对内层 `vtkITK` 单独降并行。
+
+验证情况：
+- `bash -n` 语法检查通过；未引入新的 shellcheck 问题（现存告警均为改动前已有的引号风格问题）。
+- 已从上游 Slicer `v5.12.4` 获取 `CMakeLists.txt`、`SuperBuild.cmake`、`Libs/vtkITK/CMakeLists.txt` 确认目标层级，结论明确。
+- 分析报告要求的“确认 vtkITK 目标生成层级”已完成：由内层构建生成，非外层目标。
 
 ## 潜在风险
-- `detect_memory_limit_mb` 依赖 cgroup 文件路径；若构建环境既无 cgroup v1/v2 限额文件可读，则回退 `/proc/meminfo`（与修复前一致的保守兜底）。已在本地用多种取值（普通数值、`max`、空值、64 位上限值）验证解析正确，脚本 `bash -n` 语法检查通过。
-- 单独预构建 `vtkITK` 会使其依赖（ITK、VTK、vtkAddon 等）先被构建，构建总时长可能略有增加；不改变最终产物内容。
-- 仅修改了失败直接相关的 `build-Slicer.sh`，未改动 `build-tbb.sh`/`build-CTKAppLauncher.sh`（这两者在本次日志中已构建成功），保持改动最小。
+- 全量默认构建中，`vtkITK` 的编译并行度取决于 `$PARALLEL_JOBS` 是否能通过外部工程的构建步骤正确传递。GNU Make 通过 `MAKEFLAGS` jobserver 通常可正确传递；若 CI 使用非 Make 生成器或 jobserver 传递失效，内层可能退回更高并行度，理论上仍有 OOM 风险。但这是现有脚本既有的并行度保护机制，本次仅移除非法目标，未改变该机制。
+- 保留了 `--target VTK --parallel 2` 预构建段：该段在本次 CI 中已成功执行（日志 `Built target VTK`），不属于失败根因，故未改动。
+- 未修改其余文件（Dockerfile、patch、meta.yml、README、image-info.yml），不影响两架构构建流程。
