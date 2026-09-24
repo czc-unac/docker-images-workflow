@@ -5,57 +5,46 @@
 - 失败类型: build-error
 - 置信度: 高
 - 知识库匹配: 新模式
-- 新模式标题: 缺少 wheel 包
-- 新模式症状关键词: invalid command 'bdist_wheel', metadata-generation-failed, cython_rados, ninja install
+- 新模式标题: 编译进程OOM被杀
+- 新模式症状关键词: `Killed signal terminated program cc1plus`, `fatal error`, `ninja: build stopped`, OOM, ceph, rgw_rados.cc, MemTotal
 
 ## 根因分析
 
 ### 直接错误
 ```
-#12 7933.2   Preparing metadata (pyproject.toml): finished with status 'error'
-#12 7933.2   error: subprocess-exited-with-error
-#12 7933.2       ...
-#12 7933.2       creating '/tmp/pip-modern-metadata-wx3cqub1/rados-2.0.0.dist-info'
-#12 7933.2       error: invalid command 'bdist_wheel'
-#12 7933.2       [end of output]
-#12 7933.2   note: This error originates from a subprocess, and is likely not a problem with pip.
-#12 7933.2 error: metadata-generation-failed
-#12 7933.2 × Encountered error while generating package metadata.
-#12 7933.2 ╰─> from file:///opt/ceph/src/pybind/rados
-#12 7933.2 CMake Error at src/pybind/rados/cmake_install.cmake:78 (message):
-#12 7933.2   Failed to build and install cython_rados python module
-#12 7933.2 FAILED: [code=1] CMakeFiles/install.util
-#12 7933.2 ninja: build stopped: subcommand failed.
-#12 ERROR: process "/bin/sh -c git clone -b v${VERSION} ... && ninja -j\"$JOBS\" && ninja install" did not complete successfully: exit code: 1
+#12 5766.9 [1055/1775] Building CXX object src/rgw/CMakeFiles/rgw_common.dir/driver/rados/rgw_rados.cc.o
+#12 5766.9 FAILED: [code=1] src/rgw/CMakeFiles/rgw_common.dir/driver/rados/rgw_rados.cc.o
+#12 5766.9 g++: fatal error: Killed signal terminated program cc1plus
+#12 5766.9 compilation terminated.
+#12 5777.6 ninja: build stopped: subcommand failed.
+#12 ERROR: process "... && ninja -j\"$JOBS\" && ninja install" did not complete successfully: exit code: 1
 ```
+日志中其余 `warning`（`-Wstringop-overflow`、`-Wrestrict`、`-Wmismatched-new-delete`）均为**非致命告警**，且编译命令未使用 `-Werror`（仅 `-Werror=format-security`、`-Werror=vla`），因此**不是根因**。真正致命信号是 `g++: fatal error: Killed signal terminated program cc1plus`，即编译器进程 `cc1plus` 被内核 OOM killer 杀死，导致 `ninja` 报错退出（构建镜像的 Dockerfile 自身注释也印证了该风险：*"Ceph contains very memory-hungry translation units ... so that the compiler (cc1plus) is not OOM-killed"*）。
 
 ### 根因定位
-- 失败位置: `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile:54-55`（`ninja ... && ninja install` 步骤），实际报错于 ceph 源码 `src/pybind/rados/cmake_install.cmake:78`
-- 失败原因: `ninja install` 阶段调用 pip 构建/安装 `cython_rados` python 模块（`src/pybind/rados`），pip 在准备元数据（`dist_info` / `bdist_wheel`）时因构建环境中缺少 Python `wheel` 包，报 `error: invalid command 'bdist_wheel'`，导致 metadata 生成失败，最终 `cmake_install.cmake` 报 “Failed to build and install cython_rados python module”，`ninja install` 返回 exit code 1。
-
-说明：日志中大量 `performance hint: rados_processed.pyx ... __watch_callback` 是 Cython 的性能提示（Warning，非致命）；Sass/Angular 的 `Deprecation Warning`、`4 rules skipped due to selector errors`、`exceeded maximum budget` 等均为 dashboard 前端构建阶段的警告，均非本次失败根因。真正致命错误是 `invalid command 'bdist_wheel'`。
+- 失败位置: `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile:44-55`（`RUN git clone ... && ninja -j"$JOBS" && ninja install` 步骤），OOM 发生在编译 `src/rgw/driver/rados/rgw_rados.cc` 时
+- 失败原因: 内存不足，`cc1plus` 被 OOM killer 杀死。Dockerfile 中的内存限流逻辑存在问题：它通过 `/proc/meminfo` 的 `MemTotal` 计算 `MAX_JOBS=$(( MEM_MB / 4096 ))`，而容器内 `/proc/meminfo` 默认反映的是**宿主机总量**而非容器 cgroup 内存上限，导致 `MAX_JOBS` 被高估、实际并行编译进程数超出容器可用内存，在编译 `rgw_rados.cc`（该 PR 注释自承是内存消耗极大的翻译单元）时触发 OOM。
 
 ### 与 PR 变更的关联
-本 PR 新增了 `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile`，其 Python 环境准备步骤仅为：
-```
-RUN python3 -m pip install --upgrade pip && python3 -m pip install cython prettytable
-```
-未安装 `wheel`。ceph 21.3.0 的构建在安装 `cython_rados` python 模块时使用现代 pip 的 PEP 517 元数据构建流程，需要 `bdist_wheel` 命令（由 `wheel` 包提供）。因此该失败完全由本次新增 Dockerfile 直接触发。同类 20.3.0 镜像此前可正常构建，说明 21.3.0 的 pybind 安装流程对 `wheel` 有依赖而旧版未暴露此问题。
+本次失败**完全由本 PR 新增的 Dockerfile 引起**。`Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile` 为新增文件（`new_file: True`），构建在 `[6/8]` 步骤失败，失败位置正是该新增 Dockerfile 的 `ninja -j"$JOBS"` 步骤。PR 已经意识到 Ceph 编译的内存压力并加入了基于内存的并行度限制，但该限制实现不足以避免 OOM。其余变更（`entrypoint.sh`、`README.md`、`image-info.yml`、`meta.yml`）均未进入该失败步骤。
 
 ## 修复方向
 
 ### 方向 1（置信度: 高）
-在 Dockerfile 的 Python 依赖安装步骤中补充 `wheel` 包（可选用 openEuler 的 `python3-wheel` RPM，或在 pip 安装命令中追加 `wheel`），使 `bdist_wheel` 命令可用，满足 `cython_rados` 模块的元数据/构建需求。
+修正内存限流逻辑，使并行度真正匹配容器可用内存：
+- 读取容器 cgroup 内存上限（如 cgroup v2 `/sys/fs/cgroup/memory.max`，或 cgroup v1 `/sys/fs/cgroup/memory/memory.limit_in_bytes`）而非宿主机 `/proc/meminfo` 的 `MemTotal`；当读到 `max`/极大值时再回退。
+- 同时将每 job 的内存估算值调大（当前按 ~4 GiB/job 估算，而 `rgw_rados.cc`、`rgw_lc.cc` 实测需求更高），确保 `JOBS` 足够保守。
+- 可选：为 `ninja` 增加基于负载/内存的并发约束（如 `-l`、或直接使用固定较低的 `-j`），并考虑给构建阶段分配更大内存或加入 swap。
 
 ### 方向 2（可选）
-若上游 ceph 21.3.0 的 pybind 安装对构建隔离有更高要求，可考虑为 pip 添加相应构建依赖配置（如通过 pip 的 build-dependencies），但根因仍是 `wheel` 缺失，优先采用方向 1。
+若无法可靠读取 cgroup 限制，则直接将该 RUN 步骤的 `JOBS` 固定为保守值（例如 2~4）或按经验值硬编码上限，牺牲构建时长换取构建成功率。
 
 ## 需要进一步确认的点
-- 确认 openEuler 24.03-LTS-SP4 仓库中 `python3-wheel` 包名及可用性（若不使用 pip 安装）。
-- 确认 ceph 21.3.0 `src/pybind/rados` 的 pyproject.toml 构建后端（setuptools）确实需要 `wheel` 才能完成 `dist_info`（当前日志已强烈支持该结论）。
-- 日志尾部另有一条 BuildKit 警告 `UndefinedVar: Usage of undefined variable '$LD_LIBRARY_PATH' (line 57)`（对应 `ENV LD_LIBRARY_PATH=/usr/local/lib64:$LD_LIBRARY_PATH`），属非致命警告，但建议一并按 `${LD_LIBRARY_PATH:-}` 形式处理（参见知识库模式20）；`FromAsCasing`（line 2）同理为非致命警告。两者均非本次失败根因，不应作为修复判据。
+1. 构建容器实际可用的内存上限（cgroup 限制）与宿主机内存，以及 `nproc` 的实际返回值，用以确定安全的 `JOBS`/每-job 内存阈值。
+2. 读者如需确认 `rgw_rados.cc` 的峰值内存占用，需在同等环境复现构建（本报告仅基于日志，日志已被截断，未提供 `do_cmake.sh`/configure 阶段输出，但失败的 `[6/8]` 步骤与 `[1055/1775]` 进度足以定位为编译阶段 OOM）。
+3. 是否需要针对 aarch64 与 x86-64 分别调整并行度（日志未区分架构，但两架构构建机内存可能不同）。
 
 ## 修复验证要求
-本修复不涉及对第三方/上游源文件的正则 patch，无需从上游拉取文件验证正则匹配。但 code-fixer 提交前应确认：
-1. 新增的 `wheel`（或 `python3-wheel`）安装步骤位于 `ninja install` 之前，且与其在同一/前置镜像层可被 pip 使用；
-2. 修复后重新触发 ceph 21.3.0 的完整 `ninja install`，确认不再出现 `invalid command 'bdist_wheel'` 与 `Failed to build and install cython_rados python module`。
+本修复不涉及 patch 第三方源文件的正则匹配，无需上游文件校验。但 code-fixer 在提交前应确认：
+- 新的内存/并行度计算方式在容器内能正确读取到 cgroup 内存上限（若非固定值方案），且计算出的 `JOBS` 至少为 1；
+- 保证 `ninja -j"$JOBS"` 在低内存构建机上不会再次触发 `cc1plus` OOM。
