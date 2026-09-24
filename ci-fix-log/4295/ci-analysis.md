@@ -3,68 +3,54 @@
 ## 基本信息
 - PR: #4295 — 【软件升级】3dslicer容器镜像升级至5.12.4版本
 - 失败类型: build-error
-- 置信度: 高
+- 置信度: 中
 - 知识库匹配: 新模式
-- 新模式标题: 编译OOM被杀
-- 新模式症状关键词: Killed signal terminated program cc1plus, c++: fatal error, gmake Error 1, OOM, --parallel, vtkITK
+- 新模式标题: vtkITK目标缺失
+- 新模式症状关键词: No rule to make target, vtkITK, gmake, Built target VTK, exit code 2
 
 ## 根因分析
 
 ### 直接错误
-（日志来自构建 job `#14 RUN ./build-CTKAppLauncher.sh && ./build-tbb.sh && ./build-Slicer.sh v5.12.4 /opt/slicer-arm64.patch`）
-
 ```
-#14 12275.1 c++: fatal error: Killed signal terminated program cc1plus
-#14 12275.1 compilation terminated.
-#14 12275.1 gmake[5]: *** [Libs/vtkITK/CMakeFiles/vtkITK.dir/build.make:236: Libs/vtkITK/CMakeFiles/vtkITK.dir/vtkITKGrowCut.cxx.o] Error 1
-#14 12275.1 gmake[5]: *** Waiting for unfinished jobs....
-#14 12275.1 gmake[4]: *** [CMakeFiles/Makefile2:6565: Libs/vtkITK/CMakeFiles/vtkITK.dir/all] Error 2
-#14 12275.1 gmake[3]: *** [Makefile:156: all] Error 2
-#14 12275.1 gmake[2]: *** [CMakeFiles/Slicer.dir/build.make:90: Slicer-prefix/src/Slicer-stamp/Slicer-build] Error 2
-#14 12275.1 gmake[1]: *** [CMakeFiles/Makefile2:1629: CMakeFiles/Slicer.dir/all] Error 2
-#14 12275.1 gmake: *** [Makefile:91: all] Error 2
+#14 10372.3 [100%] Built target ViewsQt
+#14 10372.4 [100%] No install step for 'VTK'
+#14 10372.4 [100%] Creating '/opt/Slicer-Release/python-install/lib/python3.12/site-packages/vtk-9.6.2.dist-info' directory
+#14 10372.4 [100%] Completed 'VTK'
+#14 10372.4 [100%] Built target VTK
+#14 10372.4 gmake: *** No rule to make target 'vtkITK'.  Stop.
 #14 ERROR: process "/bin/sh -c ./build-CTKAppLauncher.sh &&     ./build-tbb.sh &&     ./build-Slicer.sh ${BRANCH} /opt/slicer-arm64.patch" did not complete successfully: exit code: 2
+ERROR: failed to solve: process ... did not complete successfully: exit code: 2
 ```
+
+注：日志中大量 `-- Performing Test ... - Failed` / `-- Check size of ... - failed` 都是 CMake 配置阶段的正常探测（compiler support probe），并非失败根因。日志末尾为 `Finished: FAILURE`，非成功的编排层日志，故不属于“证据不足-基础设施问题”。
 
 ### 根因定位
-- 失败位置: Slicer 构建阶段目标 `Libs/vtkITK`，具体文件 `vtkITKGrowCut.cxx.o`（对应 `Libs/vtkITK/CMakeFiles/vtkITK.dir/build.make:236`），由 `build-Slicer.sh` 中 `cmake --build $build_dir --parallel $PARALLEL_JOBS` 触发
-- 失败原因: 编译器进程 `cc1plus` 被内核信号杀死（`Killed signal terminated program cc1plus`），即构建期内存耗尽被 OOM killer 终止，**并非源码语法/编译错误**。日志显示构建已推进到 74%~98%，且 ITK、CTK、HDF5、GDCM、vtkITK 等多个目标在并发编译（`gmake[5]: Waiting for unfinished jobs....`），说明实际并行度仍然很高，内存峰值超出可用上限。
+- 失败位置: `HPC/3dslicer/5.12.4/24.03-lts-sp4/build-Slicer.sh:101-103`（第二段 `cmake --build $build_dir --parallel $PARALLEL_JOBS`），由 `HPC/3dslicer/5.12.4/24.03-lts-sp4/Dockerfile:28-30` 的 RUN 触发。
+- 失败原因: 第一段 `cmake --build $build_dir --target VTK --parallel 2`（build-Slicer.sh:96-99）成功构建完 VTK 外部工程（`[100%] Completed 'VTK'` / `Built target VTK`）后，紧接着的整项目构建（未指定 `--target`，走默认目标）立即尝试构建名为 `vtkITK` 的目标，而当前生成的构建系统中不存在该目标的规则，gmake 直接以 exit code 2 终止。错误行前的构建耗时约 10372s（约 2.9 小时），且无 `Killed` / `cc1plus ... Killed`、无 timeout 标志，可排除 OOM 与超时。
 
 ### 与 PR 变更的关联
-该 PR 为新增镜像版本，新增了 `Dockerfile`、`build-Slicer.sh`、`build-tbb.sh`、`build-CTKAppLauncher.sh`、`slicer-arm64.patch` 等文件，失败 job 正是执行这些新增脚本的构建步骤，因此失败与本 PR 直接相关。
-
-值得注意的是，PR 作者已经预见到内存问题并在 `build-Slicer.sh` 中加入了缓解逻辑（注释明确写明 "the compiler (cc1plus) is OOM-killed"）：
-- `TOTAL_MEMORY_MB=$(awk '/^MemTotal:/ {printf "%d", $2 / 1024}' /proc/meminfo)`
-- `PARALLEL_JOBS=$(( TOTAL_MEMORY_MB / 4096 ))`，并与 CPU 核数取小
-- 先单独以 `--parallel 2` 构建 `VTK` 目标
-
-但该缓解**不充分**：日志证明 OOM 仍然发生在主构建阶段的 `vtkITK` 目标（`vtkITKGrowCut.cxx` 属于 vtkITK，不在预先单独构建的 `VTK` 目标范围内）。疑似原因：
-1. `/proc/meminfo` 的 `MemTotal` 反映的是宿主机总内存，而 Docker 构建容器可能受 cgroup 内存上限约束；容器内存远小于宿主机时，按宿主机内存计算的 `PARALLEL_JOBS` 会严重高估可用内存。
-2. 每个编译任务按 ~4 GiB 估算可能偏低，vtkITK / VTK 这类模板实例化密集的翻译单元单进程内存占用可远超 4 GiB。
-3. 仅对 `VTK` 目标做了低并行保护，未对同样耗内存的 `vtkITK` 目标做类似处理。
+本次 PR 为全新镜像版本：新增了 Dockerfile 以及 `build-CTKAppLauncher.sh` / `build-tbb.sh` / `build-Slicer.sh` / `slicer-arm64.patch` 等构建脚本，并更新了 `meta.yml`、`README.md`、`doc/image-info.yml`。其中 `build-Slicer.sh` 采用了“先单独构建 VTK、再全量构建”的两阶段非标准流程。失败正是由该新增的两阶段构建逻辑引入，与仓库中已有镜像（5.8.1）无关，属本次改动直接触发。`meta.yml` 新增条目（`5.12.4-oe2403sp4`）与 README/image-info 的文字改动不是本次失败原因。
 
 ## 修复方向
 
-### 方向 1（置信度: 高）
-降低主构建阶段的并行度并对 vtkITK 类重内存目标单独限流，使峰值内存不超限。具体思路（不含代码）：
-- 将 `PARALLEL_JOBS` 的计算依据由 `/proc/meminfo`（宿主机总内存）改为**容器 cgroup 内存上限**（如读取 `/sys/fs/cgroup/memory.max` 或 `/sys/fs/cgroup/memory/memory.limit_in_bytes`，并按是否存在回退），避免高估可用内存。
-- 大幅提高每编译任务的预留内存（例如由 ~4 GiB 提升到更保守的值），必要时将 Slicer 主构建直接降为 `--parallel 1`/`--parallel 2`。
-- 参照现有对 `VTK` 目标的处理，把 `vtkITK`（以及其它已知内存大户）也改为先单独以低并行度构建，再执行整体构建。
+### 方向 1（置信度: 中）
+取消“先 `--target VTK` 单独构建、再默认全量构建”的两段式，改为一次性构建 Slicer superbuild 的完整目标（默认全量目标或上游文档指定的完整构建目标），并仅用 `--parallel`（或较低并行度）来规避 OOM。单独对 VTK 调用一次构建很可能使 superbuild 的目标/依赖图处于不一致状态，导致第二次默认构建引用到尚未生成规则的目标。
 
 ### 方向 2（置信度: 中）
-从构建环境侧增加可用内存或拆分构建层：
-- 提高/取消 Docker 构建容器的内存上限（runner 侧），或在内存更大的 runner 上构建。
-- 将 Slicer 大构建拆分为更多独立 `RUN`/缓存层，使网络或单点失败后无需整体重建，并便于对最重的目标单独控制并行度。
-- 确认是否可通过 CMake 选项关闭不需要的模块以降低编译内存压力。
+保留分阶段策略，但第二段构建显式指定正确的目标名（先在配置后执行 `cmake --build $build_dir --target help` 列出实际可用目标，Slicer superbuild 的完整构建目标通常不是裸默认目标，而可能是 `Slicer`），并确认 `vtkITK` 属于内层 Slicer 子构建的模块目标，必须在子项目配置完成后才可被引用。
+
+### 方向 3（置信度: 低）
+若确认 `vtkITK` 是内层 `Libs/vtkITK` 模块目标，则第二段应进入内层构建目录（`/opt/Slicer-Release/Slicer-build`）执行构建，而不是在外层 `$build_dir` 顶层执行，从而避免在错误层级引用内层目标。
 
 ## 需要进一步确认的点
-1. CI 构建容器的实际内存上限是多少？`/proc/meminfo` 在构建容器内显示的是宿主机内存还是容器限额？这是判定 `PARALLEL_JOBS` 是否被高估的关键（日志本身不包含该信息）。
-2. `vtkITKGrowCut.cxx` 单进程编译的实际峰值内存需求，用以校准"每任务预留内存"取值。
-3. 是否所有架构构建（amd64/arm64）都在同一阶段失败，还是仅某一架构内存受限更严重（本次提供的日志未标注具体架构 job）。
-4. 提供的日志中 `#14` 构建层是否即为真正失败的架构 job；需确认是否还存在独立的 `/job/x86-64/…` 或 `/job/aarch64/…` 下游 job 日志（当前日志末尾为 `Finished: FAILURE`，属真实构建失败，但仍建议交叉核对各架构 job）。
+- 需查阅 Slicer 5.12.4 上游 superbuild（`CMakeLists.txt` / `SuperBuild/`）以确认：默认构建目标的定义、完整构建应用的正确目标名，以及 `vtkITK` 目标由哪一层（VTK 外部工程 vs 内层 Slicer 子构建）生成。
+- 需确认“先 `--target VTK` 再默认构建”这一顺序是否确实造成目标图不一致；可在配置完成后用 `cmake --build /opt/Slicer-Release --target help` 验证 `vtkITK` 目标是否存在及其归属层。
+- 需获取 aarch64 job 的完整日志，确认该失败在两架构上是否表现一致（当前日志为 x86_64，python 模块路径为 `cpython-312-x86_64-linux-gnu`）。
+- 需确认 CTKAppLauncher/TBB 两个前置脚本是否均构建成功（日志显示已进入 Slicer 构建阶段，推测成功，但应核实）。
 
 ## 修复验证要求
-本次失败不属于"正则 patch 外部源文件"场景，无需上游文件正则匹配验证。但鉴于本修复涉及构建资源计算逻辑（置信度虽高，具体阈值仍需实测确认），code-fixer 在提交前应：
-1. 从上游 Slicer v5.12.4（`BRANCH=v5.12.4`）确认 `vtkITK` 目标/`vtkITKGrowCut.cxx` 确实属于主构建而非预先单独构建的 `VTK` 目标，确保限流目标选择正确。
-2. 在目标基础镜像 `openeuler/openeuler:24.03-lts-sp4` 中确认 cgroup 版本与内存限额文件路径（cgroup v1 的 `memory/memory.limit_in_bytes` 与 cgroup v2 的 `memory.max` 不同），确保新逻辑在 CI 容器内能正确读取内存上限。
-3. 说明修复后预期的峰值并行度与内存占用量级，避免仅调参数而无依据。
+本修复不涉及“修改正则匹配第三方/上游源文件”，但置信度为“中”，code-fixer 在提交前必须执行以下验证，不得假设修复方向一定正确：
+1. 在 Slicer 5.12.4 源码（以 Dockerfile `ARG BRANCH=v5.12.4` 为准，`https://github.com/Slicer/Slicer`）中确认 superbuild 的默认目标与完整构建目标名称，并据此调整 `build-Slicer.sh` 第二段构建命令。
+2. 确认 `vtkITK` 目标的生成层级（VTK 外部工程 / 内层 Slicer 子构建 / 单独模块），避免在错误目录层级引用。
+3. 如保留“先建 VTK”阶段，需确认该阶段结束后默认/显式全量构建仍能正确解析所有目标；建议以一次干净的完整 Docker 构建验证。
+4. 同时核实 aarch64 分支是否同样出现 `No rule to make target 'vtkITK'`，因本修复需覆盖 amd64 与 arm64 两种架构。
