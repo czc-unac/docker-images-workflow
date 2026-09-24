@@ -5,8 +5,8 @@
 - 失败类型: infra-error
 - 置信度: 高
 - 知识库匹配: 新模式
-- 新模式标题: CI令牌环境变量缺失
-- 新模式症状关键词: KeyError, GITEE_API_TOKEN, eulerpublisher, get_change_files, update.py
+- 新模式标题: CI令牌缺失
+- 新模式症状关键词: GITEE_API_TOKEN, KeyError, eulerpublisher, update.py, get_change_files
 
 ## 根因分析
 
@@ -26,28 +26,25 @@ Finished: FAILURE
 ```
 
 ### 根因定位
-- 失败位置: `eulerpublisher/update/container/app/update.py:198`（`get_change_files` 函数），调用点 `update.py:354`
-- 失败原因: CI 编排工具 `eulerpublisher` 在预检/更新阶段调用 `os.environ["GITEE_API_TOKEN"]` 读取 Gitee API 令牌，但该环境变量在本次 Jenkins job 中未注入，直接抛出 `KeyError`，导致 `Execute shell` 步骤失败。失败发生在工具侧，**Docker 镜像构建尚未开始**（日志中完全没有出现 milvus 的 docker build 输出）。
+- 失败位置: `eulerpublisher/update/container/app/update.py:198`（`get_change_files` 函数），入口调用点 `update.py:354`
+- 失败原因: CI 编排工具 `eulerpublisher` 在执行变更文件收集（`get_change_files`，通过 Gitee API 获取 PR 变更文件）时，依赖环境变量 `GITEE_API_TOKEN`，而该 Jenkins 构建环境中未注入该变量，导致 `os.environ["GITEE_API_TOKEN"]` 抛出 `KeyError`，构建脚本在 Docker 镜像构建开始前即失败。
 
 ### 与 PR 变更的关联
-**与 PR 变更无关**。该错误发生在 CI 工具链读取代码变更列表的初始化阶段，早于任何 Dockerfile 解析与镜像构建。PR 的改动（新增 `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile`、README、`doc/image-info.yml`、`meta.yml`）本身是合规的版本新增/元数据登记，未涉及任何会触发 `GITEE_API_TOKEN` 读取逻辑的内容。缺少的是 Jenkins 运行环境的凭据注入，而非代码问题。
-
-### 影响范围评估
-- 属于系统性 CI 基础设施问题：凡是依赖 `GITEE_API_TOKEN` 的流水线运行都会同样失败，与具体镜像/PR 无关。
-- 对该 PR 而言：Dockerfile 的实际可构建性尚未被验证（因为构建从未运行），当前日志**无法证明或证伪** milvus 3.0.2 镜像能否成功构建。
+- **无关联**。日志中看不到任何 `docker build`、Dockerfile 指令或编译/测试步骤的执行痕迹，失败发生在 CI 工具 `eulerpublisher` 的前置变更文件收集阶段，纯粹由 CI 环境缺少密钥导致。PR 新增的 `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile`、`README.md`、`image-info.yml`、`meta.yml` 均未被执行。
+- 日志显示 `originally caused by: PR 4296 ... trigger by merge_request`，说明该 job 是 merge_request 触发的编排层任务，其失败与代码内容无关。
 
 ## 修复方向
 
 ### 方向 1（置信度: 高）
-在 Jenkins 运行环境中配置 `GITEE_API_TOKEN` 环境变量（凭据注入），使 `eulerpublisher.update.get_change_files` 能正常读取。此为 CI 基础设施修复，Code Fixer **无需修改本 PR 的任何代码或 Dockerfile**。
+属于 CI 基础设施问题（Jenkins 环境缺少 `GITEE_API_TOKEN` 凭据/secret 注入）。Code Fixer **无需修改任何 Dockerfile 或仓库文件**，应由 CI 管理员为触发 job 注入 `GITEE_API_TOKEN` 凭据后重跑流水线。
 
-### 方向 2（可选，防御性，非本次根因）
-若该工具在本地/预检场景下令牌可选，可在 `eulerpublisher/update/container/app/update.py` 中改用 `os.environ.get("GITEE_API_TOKEN")` 并提供缺失时降级逻辑。但这属于工具仓库改动，不属于本镜像仓库 PR 范围，需谨慎评估，不建议在本次 PR 中处理。
+### 方向 2（可选）
+无需其他代码层修复方向。
 
 ## 需要进一步确认的点
-1. 确认 Jenkins job（x86-64 与 aarch64 架构 job）是否在 Credentials/EnvInject 中配置了 `GITEE_API_TOKEN`，以及是否因近期配置变更丢失。
-2. 待令牌注入后**重新触发流水线**，获取真正的架构构建 job 日志（如 `/job/x86-64/…`、`/job/aarch64/…`），以验证 milvus 3.0.2 Dockerfile 本身能否构建成功——当前日志不包含任何 Docker 构建阶段输出。
-3. 本报告不能作为判断 Dockerfile 正确性的依据。若重新构建后出现编译/下载错误，需针对新的架构 job 日志另行分析。
+1. `GITEE_API_TOKEN` 缺失是全局性问题（所有 MR 均失败）还是仅本 PR 触发 job 的偶发环境问题——可对照其他近期 MR 的同一 trigger job 日志确认。
+2. 确认真正的 Docker 镜像构建 job（如 `/job/x86-64/…`、`/job/aarch64/…`）是否已执行；本次提供的日志中未见任何构建 job 的输出，因此**无法对 Dockerfile 本身的正确性做任何结论**。若 token 注入后仍需定位构建失败，需获取下游架构构建 job 的完整日志。
+3. 本次日志不包含成功标志（末尾为 `Finished: FAILURE`），故按失败处理；但由于失败点在构建之前，Dockerfile 实际能否构建成功仍属未知。
 
 ## 修复验证要求
-本次失败为 `infra-error`，**Code Fixer 无需修改任何文件**。验证方式：由 CI 运维注入 `GITEE_API_TOKEN` 后重新运行流水线，确认预检步骤通过并获取下游架构构建 job 的日志。
+不涉及正则 patch 外部源文件，无需 code-fixer 执行验证步骤。建议 code-fixer 不做任何改动，将本失败标记为 infra-error 交由 CI 环境修复后重跑。
