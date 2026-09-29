@@ -2,21 +2,21 @@
 
 ## 基本信息
 - PR: #3234 — docs: add automated new-image request guide
-- 失败类型: lint-error（appstore 发布规范/路径预检失败）
+- 失败类型: lint-error（CI 规范/路径静态校验失败）
 - 置信度: 中
-- 知识库匹配: 模式11（YAML / 元数据文件错误 / appstore 路径校验失败）
-- 新模式标题: (不适用)
-- 新模式症状关键词: (不适用)
+- 知识库匹配: 模式11
+- 新模式标题: （不适用，匹配已有模式）
+- 新模式症状关键词: （不适用）
 
 ## 根因分析
 
 ### 直接错误
 ```
-2026-09-15 09:16:26,553-...update.py[line:356]-INFO: Difference: [
+2026-09-15 09:16:26,553 ... update.py[line:356]-INFO: Difference: [
     "README.md"
 ]
-2026-09-15 09:16:31,258-...update.py[line:222]-INFO: Clone https://gitcode.com/qq_42020325/****-docker-images.git successfully.
-2026-09-15 09:16:31,262-...update.py[line:273]-ERROR: There are some specification errors for releasing on appstore in this PR, please check as above.
+...
+2026-09-15 09:16:31,262 ... update.py[line:273]-ERROR: There are some specification errors for releasing on appstore in this PR, please check as above.
 +-------------+-----------------------------------------------------+--------------+
 | Check Items |                     Description                     | Check Result |
 +-------------+-----------------------------------------------------+--------------+
@@ -27,31 +27,29 @@ Finished: FAILURE
 ```
 
 ### 根因定位
-- 失败位置: `eulerpublisher/update/container/app/update.py:273`（appstore 发布规范预检报错），被检文件为仓库根目录 `README.md`
-- 失败原因: eulerpublisher 的 appstore 发布规范预检判定本次 PR 中 `README.md` 的路径不符合规范，期望路径为 `/README.md`，因此预检表项置为 `FAILURE`，构建脚本据此将构建标记为失败。
+- 失败位置: 仓库根目录 `README.md`（CI 校验逻辑位于 `eulerpublisher/update/container/app/update.py:273`，触发差异检测于同文件 `:356`）
+- 失败原因: PR 仅改动根目录 `README.md`，CI 的 appstore 发布规范预检将其纳入了变更文件清单（`Difference: ["README.md"]`），随后路径校验判定 `README.md` 不符合期望路径 `/README.md`，导致预检 FAILURE、构建标记失败。
 
 ### 与 PR 变更的关联
-高度相关。日志中 `Difference: ["README.md"]` 表明本次 PR 的**唯一变更文件就是根目录 `README.md`**（与 `pr.diff` 一致：仅在 README.md 第 200 行附近新增了 12 行「自动化新增镜像 Issue 流程」文档）。该变更正是被 appstore 预检直接判定为路径错误的对象，即失败由本 PR 的文件变更触发，而非构建/编译/测试阶段的代码缺陷。
+直接相关。PR 的唯一改动文件就是 `README.md`（新增"通过 Issue 自动化新增镜像"指南），而 CI 报错文件中恰好是 `README.md`。此失败不是构建/编译/测试问题，而是 CI 发布规范路径校验对该文件判定失败。
 
-### 影响范围评估
-局部问题。变更仅涉及根目录文档文件，未触及任何镜像目录、Dockerfile、`meta.yml` 或 `image-list.yml`，失败被局限在发布规范预检环节。
+需要说明的矛盾点：错误信息声称"期望路径应为 `/README.md`"，而该文件本就位于仓库根目录，字面上并不矛盾。这说明校验逻辑对"变更文件应归属的镜像目录路径"存在与文档类改动不兼容的判定，属于 docs-only PR 触发 appstore 规范校验的场景（参考知识库模式11中 README 路径校验类案例）。
 
 ## 修复方向
 
 ### 方向 1（置信度: 中）
-appstore 预检将根目录 `README.md` 视为发布规范路径违规。需先确认该预检对根目录 README 的路径规则：
-- 若文档类变更本不应进入「appstore 发布检查」流程，则应从流程/触发侧排除对根目录文档的检查（如按 note 触发的发布会话不应针对纯文档 PR 执行该规范检查）；
-- 若规范要求 README 必须位于镜像最小目录单元之下，则需将新增说明迁移到符合规范的路径，或拆分为独立文档文件后提交。
+确认该 appstore 规范预检是否应对"纯文档改动（仅 README.md）"的 PR 执行。若属于校验工具对文档类 PR 的误判，应按 CI 侧规则调整（跳过无镜像文件的 PR，或明确 README 类文件的期望路径规则），无需改动本 PR 的文档内容。
 
-具体以 `update.py` 中生成该检查表的逻辑为准，不预设结论。
-
-### 方向 2（可选，置信度: 低）
-存在 eulerpublisher 路径归一化问题的可能：diff 侧路径 `README.md`（无前导斜杠）与期望值 `/README.md`（带前导斜杠）比较不一致，导致误报。若确认如此，则属 CI 工具侧缺陷（infra），Code Fixer 无需修改代码，应反馈给流水线维护方。
+### 方向 2（置信度: 低）
+若该路径校验是有效规则，则需对照 CI 的期望路径规则 `/README.md`，核对当前变更文件的实际路径表示是否与规则一致（根目录 README 是否被识别为带前导 `/` 的路径），并据此调整文档文件的放置/命名以符合规范。
 
 ## 需要进一步确认的点
-1. `eulerpublisher/update/container/app/update.py:273` 附近逻辑及其生成「Check Items / Description / Check Result」表的函数，确认 `README.md` 路径校验的实际规则与「/README.md」这一期望值的计算方式。
-2. 该预检是否维护「允许变更文件」白名单，仓库根 `README.md` 是否在其中；以及该流水线是否只应针对镜像发布类 PR 运行。
-3. 本次构建的触发方式（日志为 `trigger by note`，由上游 `multiarch/openeuler/trigger/openeuler-docker-images` 触发）是否会对纯文档 PR 错误地执行 appstore 发布规范检查。
+- `README.md` 的路径校验规则来源与判定逻辑（`eulerpublisher/update/container/app/update.py:273` 及其调用的校验函数），确认"expected path should be /README.md"针对的是文件自身还是其所属镜像目录。
+- 该 CI 预检是否只应在变更包含镜像文件（Dockerfile/meta.yml 等）时触发，以及文档类 PR 是否应豁免。
+- 错误表中 `Check Items` 与 `Description` 的生成规则，确认 FAILURE 是否由"变更文件不在任一镜像目录内"引起。
+- 报告的 `ci.logs` 来自 x86-64 编排/校验 job（`Building remotely on ecs-build-docker-x86-hk`），需确认是否有其它下游架构 job 也复现同一校验失败。
 
 ## 修复验证要求
-本次失败不涉及对第三方/上游源文件的正则 patch，无需从上游仓库拉取验证。若修复方向选择「调整预检规则」，应在提交前用本 PR 相同的纯文档变更复现该预检流程，确认 `README.md` 不再被标记为 `FAILURE`。
+本失败不涉及"修改正则 patch 外部源文件"，无需填写该验证项。
+
+> 备注：本次 `ci.logs` 末尾为 `Finished: FAILURE`，不存在"日志成功但 PR 处于失败状态"的情况，故按上述正常流程分析。若后续确认失败判定来自未提供日志的其它下游 job，则应重新归类为 `infra-error` 并降置信度。
