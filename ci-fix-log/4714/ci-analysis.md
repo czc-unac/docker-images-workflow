@@ -2,46 +2,47 @@
 
 ## 基本信息
 - PR: #4714 — 【自动升级】torchvision容器镜像升级至0.29.0版本.
-- 失败类型: dependency-error
-- 置信度: 高
-- 知识库匹配: 模式23（PyTorch版本锁定冲突）
-- 新模式标题: (不适用)
-- 新模式症状关键词: (不适用)
+- 失败类型: infra-error
+- 置信度: 中
+- 知识库匹配: 新模式
+- 新模式标题: BuildKit构建器中途停止
+- 新模式症状关键词: failed to receive status, rpc error code Unavailable, no builder found, graceful_stop, buildx builder
 
 ## 根因分析
 
 ### 直接错误
 ```
-#8 1.304 Collecting torch==2.12.1
-#8 1.686 Collecting torchvision==0.29.0
-#8 2.660 ERROR: Cannot install torch==2.12.1 and torchvision==0.29.0+cpu because these package versions have conflicting dependencies.
-#8 2.661 The conflict is caused by:
-#8 2.661     The user requested torch==2.12.1
-#8 2.661     torchvision 0.29.0+cpu depends on torch==2.14.0
-#8 2.661 ERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/#dealing-with-dependency-conflicts
-#8 ERROR: process "/bin/sh -c pip install --no-cache-dir         --index-url https://download.pytorch.org/whl/cpu         torch==${TORCH_VERSION}         torchvision==${VERSION}" did not complete successfully: exit code: 1
+#8 8.277 Installing collected packages: mpmath, typing-extensions, sympy, setuptools, pillow, numpy, networkx, MarkupSafe, fsspec, filelock, jinja2, torch, torchvision
+ERROR: failed to receive status: rpc error: code = Unavailable desc = closing transport due to: connection error: desc = "error reading from server: EOF", received prior goaway: code: NO_ERROR, debug data: "graceful_stop"
+ERROR: no builder "euler_builder_20260929_082519" found
+Build step 'Execute shell' marked build as failure
+Notifying upstream projects of job completion
+Finished: FAILURE
 ```
 
 ### 根因定位
-- 失败位置: `AI/torchvision/0.29.0/24.03-lts-sp4/Dockerfile:10-13`（`RUN pip install ... torch==${TORCH_VERSION} torchvision==${VERSION}` 步骤）
-- 失败原因: Dockerfile 中 `ARG TORCH_VERSION=2.12.1` 指定的 torch 版本，与 `torchvision==0.29.0` 的上游硬依赖 `torch==2.14.0` 不兼容，pip 依赖解析器无法同时满足两者，报 `ResolutionImpossible`。
+- 失败位置: 非代码位置。发生在 aarch64 构建 job 的 Docker 构建第 `[3/3]` 步 `pip install torch torchvision` 期间，BuildKit 构建器 `euler_builder_20260929_082519`（`docker-container` driver）被回收/优雅关闭。
+- 失败原因: 客户端与 BuildKit daemon 的 gRPC 连接收到 `goaway ... graceful_stop`，随后提示该 builder 已不存在。构建器在 `pip install` 下载/安装 `torch`、`torchvision`（约 159MB torch wheel）过程中被停止，导致构建中断。这属于构建基础设施层面的中断，而非 Dockerfile 内容触发的编译/依赖错误。
 
 ### 与 PR 变更的关联
-本次为新增镜像自动升级 PR，新增 `AI/torchvision/0.29.0/24.03-lts-sp4/Dockerfile`，其中同时硬编码 `ARG TORCH_VERSION=2.12.1` 与 `ARG VERSION=0.29.0`。日志的失败完全发生在这个新增 Dockerfile 的 pip 安装步骤中，**由本 PR 改动直接触发**，与基础设施无关。
+- 本 PR 仅在 `AI/torchvision/` 下新增/更新 Dockerfile、README、`doc/image-info.yml`、`meta.yml`，Dockerfile 结构正常（`dnf install` 已成功，`pip install` 的依赖解析与下载均成功），日志中没有任何因本次改动引发的代码/依赖/语法错误。
+- 从日志看 `pip` 已完成索引解析并成功下载全部 wheel（torch 2.14.0、torchvision 0.29.0 等），未出现 `ResolutionImpossible` 等依赖冲突，可排除模式23（PyTorch版本锁定冲突）。
+- 因此该失败与 PR 变更无直接因果关系，属基础设施中断。
+- 需注意的异常点: 日志中实际执行的 pod 为 PR 4738（`unac:fix/4714 -> master`，build 5048），且构建时使用的是 `torch==2.14.0`，与上下文 `pr.diff` 中 `ARG TORCH_VERSION=2.12.1` 不一致，说明被构建的修订与所提供的 diff 可能并非同一版本，证据链存在偏差。
 
 ## 修复方向
 
-### 方向 1（置信度: 高）
-将 Dockerfile 中的 `ARG TORCH_VERSION` 调整为与 `torchvision 0.29.0` 上游声明一致的版本（日志明确其为 `torch==2.14.0`），使 torch/torchvision 版本组合满足 pip 依赖约束。
+### 方向 1（置信度: 中）
+- 重新触发 CI / 重跑该 job。构建器 `graceful_stop` 属于 CI 环境中的临时性基础设施事件（builder 被回收、daemon 重启或资源清理），与代码无关，重试通常即可通过。
 
-### 方向 2（可选，置信度: 中）
-若上游 `download.pytorch.org/whl/cpu` 索引中不存在与 torchvision 0.29.0 匹配的 torch 2.14.0 制品（该索引对普通发布可能存在滞后/缺版本），则需要重新评估 torchvision 的目标版本，或改用与现有 torch 版本兼容的 torchvision 版本，避免二者约束冲突。
+### 方向 2（可选，置信度: 低）
+- 若重跑后仍在同一 `pip install` 步骤稳定失败，则需怀疑构建节点资源（磁盘/内存）不足导致 BuildKit 被强制回收；此时应确认 runner 的磁盘/内存水位，而非修改 Dockerfile。
 
 ## 需要进一步确认的点
-1. `AI/torchvision/0.29.0/24.03-lts-sp4/Dockerfile` 中 `TORCH_VERSION` 的确切当前值（diff 中为 `2.12.1`），以及项目其他 torchvision 版本的 `TORCH_VERSION` 约定（如 0.27.1 使用的 torch 版本），确认版本对应矩阵。
-2. 从上游确认 torchvision 0.29.0 对 torch 的依赖版本是否稳定为 `2.14.0`（日志来自 `torchvision-0.29.0+cpu` 的 metadata），避免依赖版本随上游变化导致再次冲突。
-3. 确认 `https://download.pytorch.org/whl/cpu` 索引中目标 torch 版本是否同时提供 x86_64 与 aarch64 的 `+cpu` wheel（README/image-info 声明支持 amd64、arm64），防止只修 x86 而 arm 侧仍失败。
+1. 需获取本次真正失败 job 的完整日志（尤其是 `pip install` 之后是否出现 `Killed`、`no space left on device`、`Aborted`、Jenkins timeout 等信号），以区分“临时回收”与“资源耗尽”。
+2. 确认被构建的实际修订：日志显示构建内容为 PR 4738 且 `torch==2.14.0`，而 `pr.diff` 为 `TORCH_VERSION=2.12.1`，需核对当前 PR 分支上 Dockerfile 的真实 `TORCH_VERSION` 值，避免误判。
+3. 确认是否存在并发 job 共用/清理同一 buildx builder（`euler_builder_20260929_082519`）的编排逻辑，导致构建中途被回收。
+4. 确认 CI 对 buildx builder 是否设有超时/生命周期回收策略。
 
 ## 修复验证要求
-不涉及正则 patch 外部源文件，无需向上游拉取 fetcher.py 等文件验证。
-但 code-fixer 在提交前必须确认：所选 `TORCH_VERSION` 与 `VERSION`（torchvision 0.29.0）组合在 `--index-url https://download.pytorch.org/whl/cpu` 下可被 pip 解析成功，且提供 amd64 与 arm64 两个架构的 CPU wheel。
+本失败判定为 `infra-error`，未涉及任何正则 patch 或外部源文件匹配，Code Fixer 无需修改代码。若后续重跑仍复现同一错误，先补充上述第 1、3、4 点证据再决定是否需要修复动作。
