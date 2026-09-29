@@ -2,21 +2,21 @@
 
 ## 基本信息
 - PR: #3234 — docs: add automated new-image request guide
-- 失败类型: lint-error（CI 发布规范 / 路径校验预检失败，非编译、非测试失败）
+- 失败类型: lint-error（appstore 发布规范/路径预检失败）
 - 置信度: 中
-- 知识库匹配: 模式11（元数据 / 路径一致性校验失败）
-- 新模式标题: （不适用，已匹配现有模式）
-- 新模式症状关键词: （不适用）
+- 知识库匹配: 模式11（YAML / 元数据文件错误 / appstore 路径校验失败）
+- 新模式标题: (不适用)
+- 新模式症状关键词: (不适用)
 
 ## 根因分析
 
 ### 直接错误
-```text
-2026-09-15 09:16:26,553 update.py[line:356]-INFO: Difference: [
+```
+2026-09-15 09:16:26,553-...update.py[line:356]-INFO: Difference: [
     "README.md"
 ]
-2026-09-15 09:16:31,258 update.py[line:222]-INFO: Clone https://gitcode.com/qq_42020325/****-docker-images.git successfully.
-2026-09-15 09:16:31,262 update.py[line:273]-ERROR: There are some specification errors for releasing on appstore in this PR, please check as above.
+2026-09-15 09:16:31,258-...update.py[line:222]-INFO: Clone https://gitcode.com/qq_42020325/****-docker-images.git successfully.
+2026-09-15 09:16:31,262-...update.py[line:273]-ERROR: There are some specification errors for releasing on appstore in this PR, please check as above.
 +-------------+-----------------------------------------------------+--------------+
 | Check Items |                     Description                     | Check Result |
 +-------------+-----------------------------------------------------+--------------+
@@ -26,45 +26,32 @@ Build step 'Execute shell' marked build as failure
 Finished: FAILURE
 ```
 
-说明：日志末尾为 `Finished: FAILURE`（不是 `Finished: SUCCESS`），失败状态与日志一致，前置一致性检查通过，可继续分析。
-
 ### 根因定位
-- 失败位置: `eulerpublisher/update/container/app/update.py:273`（appstore 发布规范校验报错），
-  差异文件来源见 `update.py:356`（`Difference` 计算）。日志中实际被校验的文件为 `README.md`。
-- 失败原因: CI 在执行 appstore 发布规范预检时，将本次 PR 的唯一变更文件 `README.md` 判为路径不合规，
-  提示期望路径为 `/README.md`，规范校验表返回 `FAILURE`，整个 job 被标记为失败。
-- 失败发生在构建/测试之前的规范预检阶段，未进入任何镜像的 Docker build 或功能测试。
+- 失败位置: `eulerpublisher/update/container/app/update.py:273`（appstore 发布规范预检报错），被检文件为仓库根目录 `README.md`
+- 失败原因: eulerpublisher 的 appstore 发布规范预检判定本次 PR 中 `README.md` 的路径不符合规范，期望路径为 `/README.md`，因此预检表项置为 `FAILURE`，构建脚本据此将构建标记为失败。
 
 ### 与 PR 变更的关联
-该 PR 为纯文档变更，diff 仅在根目录 `README.md` 新增 12 行"自动化新增应用镜像申请指南"，删除 0 行。
-CI 的 `Difference` 输出恰为 `README.md`，即被规范校验拦截的对象正是本次 PR 修改的这个文件。
-因此，失败由本 PR 的文档改动直接触发（变更文件路径未通过 appstore 规范校验）。
+高度相关。日志中 `Difference: ["README.md"]` 表明本次 PR 的**唯一变更文件就是根目录 `README.md`**（与 `pr.diff` 一致：仅在 README.md 第 200 行附近新增了 12 行「自动化新增镜像 Issue 流程」文档）。该变更正是被 appstore 预检直接判定为路径错误的对象，即失败由本 PR 的文件变更触发，而非构建/编译/测试阶段的代码缺陷。
 
-## 影响范围评估
-局部问题，位于 CI 发布规范预检层，与镜像 Dockerfile 构建、功能测试无关；不涉及多架构构建失败。
+### 影响范围评估
+局部问题。变更仅涉及根目录文档文件，未触及任何镜像目录、Dockerfile、`meta.yml` 或 `image-list.yml`，失败被局限在发布规范预检环节。
 
 ## 修复方向
 
 ### 方向 1（置信度: 中）
-该预检针对"发布到 appstore"的镜像相关文件做路径规范校验。本 PR 仅改动根目录 `README.md`，
-需确认根目录 README 是否属于该校验允许的路径范畴；若不允许，应将新增文档放置到校验规则接受的目录/位置，
-或将文档内容并入已有的规范文档中，避免单独修改触发路径校验的 `README.md`。
+appstore 预检将根目录 `README.md` 视为发布规范路径违规。需先确认该预检对根目录 README 的路径规则：
+- 若文档类变更本不应进入「appstore 发布检查」流程，则应从流程/触发侧排除对根目录文档的检查（如按 note 触发的发布会话不应针对纯文档 PR 执行该规范检查）；
+- 若规范要求 README 必须位于镜像最小目录单元之下，则需将新增说明迁移到符合规范的路径，或拆分为独立文档文件后提交。
 
-### 方向 2（置信度: 中/低）
-校验提示"期望路径为 `/README.md`"而实际差异路径为 `README.md`（缺少前导 `/`），
-可能是 `update.py` 路径规范化逻辑与 diff 输出格式不一致导致的误报（CI 工具层问题）。
-若确认根目录 README 本应被允许，则该失败属 `infra-error`，Code Fixer 无需修改仓库代码，
-需由 CI / eulerpublisher 维护方修复路径校验逻辑。
+具体以 `update.py` 中生成该检查表的逻辑为准，不预设结论。
+
+### 方向 2（可选，置信度: 低）
+存在 eulerpublisher 路径归一化问题的可能：diff 侧路径 `README.md`（无前导斜杠）与期望值 `/README.md`（带前导斜杠）比较不一致，导致误报。若确认如此，则属 CI 工具侧缺陷（infra），Code Fixer 无需修改代码，应反馈给流水线维护方。
 
 ## 需要进一步确认的点
-1. `eulerpublisher/update/container/app/update.py:273` 及其调用的路径校验函数，对 `README.md`
-   的"期望路径"判定规则（为何期望 `/README.md`，实际输入为 `README.md`）。
-2. appstore 规范校验是否要求文档必须位于各镜像最小目录单元内（如 `{image}/README.md`），
-   根目录 `README.md` 是否在白名单内。
-3. `update.py:356` 计算 `Difference` 的文件路径格式（是否带前导 `/`），以判断是否为路径归一化缺陷。
-4. 历史上根目录 `README.md` 的文档 PR 是否同样触发该预检失败，用于区分"规范要求"与"CI 工具误报"。
+1. `eulerpublisher/update/container/app/update.py:273` 附近逻辑及其生成「Check Items / Description / Check Result」表的函数，确认 `README.md` 路径校验的实际规则与「/README.md」这一期望值的计算方式。
+2. 该预检是否维护「允许变更文件」白名单，仓库根 `README.md` 是否在其中；以及该流水线是否只应针对镜像发布类 PR 运行。
+3. 本次构建的触发方式（日志为 `trigger by note`，由上游 `multiarch/openeuler/trigger/openeuler-docker-images` 触发）是否会对纯文档 PR 错误地执行 appstore 发布规范检查。
 
 ## 修复验证要求
-本修复方向不涉及对第三方/上游源文件使用正则 patch，无需执行上游文件拉取验证。
-若最终判定为方向 1（需调整文档位置），Code Fixer 应先确认规范校验所接受的路径，再移动/合并文档；
-若判定为方向 2（工具层误报），应标记为 `infra-error`，不在本仓库内做代码修改。
+本次失败不涉及对第三方/上游源文件的正则 patch，无需从上游仓库拉取验证。若修复方向选择「调整预检规则」，应在提交前用本 PR 相同的纯文档变更复现该预检流程，确认 `README.md` 不再被标记为 `FAILURE`。
