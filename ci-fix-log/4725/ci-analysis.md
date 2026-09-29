@@ -4,15 +4,15 @@
 - PR: #4725 — 【自动升级】lammps容器镜像升级至2025.07.22版本.
 - 失败类型: build-error
 - 置信度: 高
-- 知识库匹配: 模式02（下载 URL 版本/路径构造错误，伴随 404）；亦与模式27（上游下载 URL 404）同源
-- 新模式标题: 不适用（匹配已有模式）
-- 新模式症状关键词: 不适用
+- 知识库匹配: 模式02（下载 URL 版本路径错误 / 软件包版本不存在），与模式27（GitHub Release URL 404）同源
+- 新模式标题: (不适用)
+- 新模式症状关键词: (不适用)
 
 ## 根因分析
 
 ### 直接错误
 ```
-#9 [4/8] RUN wget https://github.com/lammps/lammps/archive/refs/tags/stable_2025.07.22.tar.gz     && tar -zxvf stable_2025.07.22.tar.gz     && rm -f stable_2025.07.22.tar.gz
+#9 0.071 --2026-09-29 08:24:02--  https://github.com/lammps/lammps/archive/refs/tags/stable_2025.07.22.tar.gz
 #9 0.260 HTTP request sent, awaiting response... 302 Found
 #9 0.704 Location: https://codeload.github.com/lammps/lammps/tar.gz/refs/tags/stable_2025.07.22 [following]
 #9 0.845 HTTP request sent, awaiting response... 404 Not Found
@@ -21,30 +21,27 @@
 ------
 Dockerfile:13
   13 | >>> RUN wget https://github.com/lammps/lammps/archive/refs/tags/stable_${VERSION}.tar.gz \
-ERROR: failed to solve: process "..." did not complete successfully: exit code: 8
-Build step 'Execute shell' marked build as failure
-Finished: FAILURE
 ```
 
 ### 根因定位
 - 失败位置: `HPC/lammps/2025.07.22/24.03-lts-sp4/Dockerfile:13`
-- 失败原因: 新增 Dockerfile 以 `ARG VERSION=2025.07.22` 拼接上游下载地址 `stable_${VERSION}.tar.gz`，得到 `stable_2025.07.22.tar.gz`，该 Git tag 在 `lammps/lammps` 上游仓库不存在，GitHub 重定向到 `codeload.github.com` 后返回 HTTP 404（wget exit code 8），Docker 构建在该层失败。
+- 失败原因: `ARG VERSION=2025.07.22` 拼接出的上游 tag 为 `stable_2025.07.22`，该 tag 在 `github.com/lammps/lammps` 不存在，wget 经 302 重定向到 codeload 后返回 HTTP 404，Docker 构建失败（exit code 8）。LAMMPS 官方 stable tag 采用 `stable_<DDMonYYYY>` 命名（如既有镜像使用的 `29Aug2024`、`22Jul2025`），并不存在形如 `stable_2025.07.22` 的“点分年月日”tag。
 
 ### 与 PR 变更的关联
-直接相关。本 PR 新增 `HPC/lammps/2025.07.22/24.03-lts-sp4/Dockerfile`，第 13 行的源码下载 URL 使用了 `2025.07.22` 这一版本字符串，而 LAMMPS 上游 stable tag 的命名并非 `YYYY.MM.DD` 形式（仓库中已存在的同类条目为 `22Jul2025`、`29Aug2024`，即 `stable_<日><月><年>` 形式，参见相邻目录与 `image-list.yml`/`meta.yml`）。`image-info.yml` 中声明 `version_scheme: RPM`，说明展示版本被规范化为 `2025.07.22`，但该规范化版本被直接用于构造 Git tag，导致 tag 名与上游不一致并 404。注意 `2025.07.22` 与既有 `22Jul2025` 疑似为同一发布日期（2025 年 7 月 22 日），存在重复升级/版本命名不一致的可能。
+本 PR 的 diff 新增了 `HPC/lammps/2025.07.22/24.03-lts-sp4/Dockerfile`（`new_file: true`，共 25 行），其中第 13 行的 wget 下载逻辑是本失败的直接触发点；同 PR 的 `README.md`、`doc/image-info.yml`、`meta.yml` 仅登记该新版本。CI 失败由新 Dockerfile 的版本号/tag 构造方式直接引起，与既有 22Jul2025、29Aug2024 镜像无关。日志末尾为 `Finished: FAILURE`，失败发生在本次提供的构建 job 内，日志与状态一致，非下钻架构 job 缺失的问题。
 
 ## 修复方向
 
 ### 方向 1（置信度: 高）
-修正 Dockerfile 中下载 URL 的 tag 构造，使其与 LAMMPS 上游实际存在的 Git tag 一致，而非使用 RPM 展示版本 `2025.07.22`。即区分"展示/目录版本（`2025.07.22`）"与"上游 tag 版本（形如 `22Jul2025`）"，用正确的上游 tag 生成 `stable_<tag>.tar.gz` 下载地址。
+修正 LAMMPS 版本/tag 的取值与命名，使下载 URL 指向真实存在的上游 tag。对应 2025-07-22 发布的 LAMMPS 版本，上游 stable tag 实为 `stable_22Jul2025`（与仓库中已有的 `22Jul2025` 镜像一致）。应将 Dockerfile 中 `VERSION`/目录版本标识改为上游真实 tag 形式，并同步更新 README.md、doc/image-info.yml、meta.yml 中的版本标识与路径，确保 wget 构造出 `stable_22Jul2025.tar.gz`。
 
-### 方向 2（可选）
-若 `2025.07.22` 确为上游新的发布版本，则需确认其真实 tag 命名规则后再构造 URL；如上游仅提供 Release 制品或 tag 命名变更，可改用其归档地址/镜像源下载。同时确认本次是否为对既有 `22Jul2025` 的重复升级（两者日期相同），避免重复提交。
+### 方向 2（置信度: 中）
+若坚持使用“点分日期”作为镜像目录版本号（`2025.07.22`），则需在 Dockerfile 中显式指定真实的上游 tag（例如单独引入 `LAMMPS_TAG=22Jul2025`）用于拼接 URL，而不要用版本目录名直接拼 tag；同时需核对 `doc/image-info.yml` 的 `version_prefix: stable_` / `version_scheme: RPM` 配置是否能从上游正确解析出该 tag，避免自动升级再次生成非法 tag。
 
 ## 需要进一步确认的点
-1. LAMMPS 上游是否存在对应 2025-07-22 的发布，及其确切的 Git tag 名称（`stable_2025.07.22` 已被证伪，需确认是 `stable_22Jul2025` 还是其他命名）。
-2. `HPC/lammps/2025.07.22/` 与现有 `HPC/lammps/22Jul2025/` 是否为同一版本；若为同一发布，应确认是否应合并/去重。
-3. `image-info.yml` 的 `version_scheme: RPM` 与上游 tag 命名之间的关系（展示版本与下载版本是否应由不同字段/变量承载）。
+1. 从上游确认 LAMMPS 2025-07-22 发布版对应的准确 Git tag 名称（预期为 `stable_22Jul2025`，需以 GitHub releases/tags 实际值为准）。
+2. 确认仓库版本目录命名约定：历史 lammps 镜像使用 `22Jul2025` 形式，本次自动升级生成了 `2025.07.22` 形式，需确认是否应同时统一目录名、meta.yml 的 key 与 README 链接路径。
+3. 确认 `doc/image-info.yml` 中 `version_filter: patch;update` 与 `version_scheme: RPM` 是否适用于 LAMMPS 的日期式 tag，若否则自动升级会持续产出不存在的 tag。
 
 ## 修复验证要求
-code-fixer 在提交前，必须访问 LAMMPS 上游仓库（https://github.com/lammps/lammps/tags）确认与 `2025.07.22` 对应的真实 tag 名称，并验证 `https://github.com/lammps/lammps/archive/refs/tags/stable_<实际tag>.tar.gz` 返回 200（而非 404），再据此修正 Dockerfile 中的 URL 构造；不得假设 `stable_2025.07.22` 或其他未验证的 tag 可用。
+本失败属于上游 tag 命名不匹配（下载 404），修复方向不涉及对第三方/上游源文件做正则 patch，无需按“正则 patch”流程验证；但 code-fixer 在提交前必须从上游仓库核实所选 tag 确实存在，即确认 `https://github.com/lammps/lammps/archive/refs/tags/stable_<修正后的tag>.tar.gz` 可正常下载（HTTP 200），再提交版本标识与路径的统一修改。
