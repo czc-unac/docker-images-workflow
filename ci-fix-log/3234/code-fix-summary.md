@@ -1,27 +1,25 @@
 # 修复摘要
 
 ## 修复的问题
-无需代码修改：本 PR 的 CI 失败属于 tool/infra-error——`eulerpublisher` 的 appstore 发布规范预检 `format.py` 对**仓库根目录** `README.md` 存在路径归一化缺陷，会把任何对根目录 `README.md` 的改动误判为图片级 README 并要求路径 `/README.md`，该期望路径在文件系统中永不存在，因此任何 README 内容改动都无法通过校验。
+经核实，本次 CI 失败是 EulerPublisher 发布规范预检工具自身的路径拼接缺陷（infra/tool bug），不是本仓库 `README.md` 内容的问题，因此无需对源码仓库做任何代码修改。
 
 ## 修改的文件
-（无）
+- 无（未修改任何文件；本 PR 唯一涉及文件 `README.md` 无任何可使其通过预检的内容改动）
 
 ## 修复逻辑
-1. 分析报告给出的两种方向中，经核对上游 `eulerpublisher` 源码，确认属**方向 2（CI 工具层误报）**，故按流程规则（FIX-05 / `code-fix.py` 的 `no_changes` 分支）不做代码修改。
-2. 根因定位（已从上游获取实际源文件验证）：
-   - 拉取 `https://gitee.com/openeuler/eulerpublisher/raw/master/update/container/app/format.py`（与 GitHub 镜像 `openeuler-mirror/eulerpublisher/master` 一致）。
-   - `check_report()` 第 1 步对每个变更文件：`file_type = change_file.split("/")[-1].split(".")[0]`。对根目录 `README.md`/`README.en.md`，`file_type == "README"`，命中 `DOC_FILES_PATH_FORMAT`，因此**不会**被跳过。
-   - `parse_image_prefix("README.md")`：`contents` 只有一个元素，返回 `("", "")`，即 `prefix == ""`。
-   - `_check_all_file_paths("README.md")`：`correct_path = DOC_FILES_PATH_FORMAT["README"].format("", "README.md")` → `"/README.md"`；`os.path.exists("/README.md")` 恒为 `False`，于是返回 `[Path Error] The expected path should be /README.md`，`fail_count += 1`，`update.py:273` 判定失败。
-   - 在内存中复现该逻辑：`README.md` → `FAIL: expected /README.md (exists=False)`；`README.en.md` → 同样失败。即根目录任何 `README*` 改动都会被误报。
-3. 该缺陷与 PR 内容无关：
-   - 根目录 `README.md` 是仓库合法的项目主文档，历史上有根 README 文档 PR 合入（如 commit `5c99b50d6`，2026-07-12）。
-   - 本 PR 为纯文档变更（根 `README.md` 新增 12 行），被拦截对象正是这个根目录文件。
-   - 期望路径 `/README.md` 指向文件系统根目录，逻辑上不可能满足；且该预检在 Docker build / 功能测试之前执行，与镜像构建无关。
-4. 在「只允许修改 `README.md`、禁止新增文件、禁止修改 eulerpublisher」的约束下，不存在可让该预检通过的仓库内改法（改动 README 必然重新进入同一误判；把文档移动/合并到其他位置也会触发或需要触碰非授权文件）。强行改动只会掩盖问题，故不做修改。
+通过拉取上游预检源码 `https://gitee.com/openeuler/eulerpublisher/raw/master/update/container/app/format.py` 逐行定位，确认失败链路如下：
+
+1. `update/container/app/update.py` 的 `check_code()` 调用 `format.check_report(self.change_files)` 做 appstore 发布规范预检。
+2. `format.py` 的 `check_report()` 第 1 步遍历变更文件：对 `README.md`，`file_type = "README"`，该类型确实存在于 `DOC_FILES_PATH_FORMAT = {"README": "{0}/README.md", ...}`，因此**不会被跳过**，被纳入路径校验。
+3. `parse_image_prefix("README.md")` 中 `contents = ["README.md"]`，`len(contents) == 1`，函数直接返回 `("", "")`，即 `prefix = ""`。
+4. `_check_all_file_paths("README.md")` 计算 `correct_path = DOC_FILES_PATH_FORMAT["README"].format("", "README.md")`，字符串模板 `"{0}/README.md"` 在 `{0}` 为空时产生**前导斜杠**，得到 `/README.md`。
+5. `os.path.exists("/README.md")` 恒为 False（指向文件系统根目录），于是返回 `(False, "[Path Error] The expected path should be /README.md")`，`fail_count` 加一，`check_code()` 打印 `There are some specification errors...` 并返回非 0，构建被标记为失败。
+
+我用相同逻辑在 Python 中复现，确认 `"{0}/README.md".format("") == "/README.md"` 且 `os.path.exists("/README.md")` 为 False，与分析报告的失败表项完全一致。
+
+结论：`DOC_FILES_PATH_FORMAT` 仅用于**镜像最小目录单元下的文档**（如 `AI/opea/README.md`），而仓库**根目录的 `README.md`** 被错误地套用了同一模板；由于 `prefix` 为空，期望路径变成绝对路径 `/README.md`，从而对**任何修改根目录 README 的 PR（不仅是文档类 PR）都必然误报**。这是 `format.py` 的空前缀处理缺陷，修复点应位于 `eulerpublisher` 工具侧（例如当 `prefix` 为空时令 `correct_path = contents[-1]`，或在 `check_report` 中跳过仓库根级文档），而**不在本仓库**。本 PR 仅新增了 12 行“通过 Issue 自动新增应用镜像”的说明文档，未触碰任何镜像目录、Dockerfile、`meta.yml` 或 `image-list.yml`，故失败由工具在纯文档变更上误触发，而非文档内容本身。
+
+对应分析报告的“修复方向·方向 2（置信度低）”：现已由上游源码证实预检的路径归一化确有缺陷，属流水线/工具侧问题（infra）。分析报告“方向 1”中可落地的仓库侧做法（迁移到规范路径或拆分为独立新文档文件）均与本次任务约束冲突——本任务明确**只允许修改 `README.md` 且禁止创建任何新文件**；而 `README.md` 作为文件名，其 `file_type` 恒为 `"README"`、`prefix` 恒为空，无论内容如何修改都无法改变上述判定，故不存在满足约束的仓库侧修复。
 
 ## 潜在风险
-无（未改动任何源码文件）。
-
-## 建议（交由 CI / eulerpublisher 维护方）
-在 `update/container/app/format.py` 的 `check_report()` 中，当 `parse_image_prefix(change_file)` 返回空前缀（即文件位于仓库根目录，`len(path.split("/")) == 1`）时跳过该文件的路径校验；或在 `parse_image_prefix` 中对单段路径直接返回可跳过标记。这样根目录 `README.md`/`README.en.md` 的文档 PR 才能正常通过 appstore 发布规范预检。
+无代码改动，不引入任何回归。需注意：在 `eulerpublisher` 修复该缺陷前，任何以修改仓库根目录 `README.md` 为唯一/主要内容的 PR 都会重复触发同一误报，建议将本结论反馈给流水线维护方（`eulerpublisher` 仓库）修复 `update/container/app/format.py` 中的空前缀处理。
