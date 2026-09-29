@@ -776,3 +776,17 @@ RUN sed -i 's/#define HAS_RGBTOUVMATRIXROW_NEON/\/\/#define HAS_RGBTOUVMATRIXROW
 
 **历史案例**:
 - PR #2991: `Others/vvenc/1.14.0/24.03-lts-sp4/Dockerfile` — 在 cmake 配置阶段添加 `-DVVENC_ENABLE_WERROR=OFF`，避免因 openEuler 24.
+
+---
+
+## 模式43：Python版本不满足jax
+
+**症状关键词**: Requires-Python >=3.12, No matching distribution found, jax==0.11.2, python3.9, pip install
+
+**根因**: - 失败位置: `HPC/jax/0.11.2/24.03-lts-sp4/Dockerfile:8`（`RUN pip install ... jax==${VERSION} jaxlib` 步骤）
+- 失败原因: 基础镜像 `openeuler/openeuler:24.03-lts-sp4` 自带的 Python 为 3.9，而 `jax 0.11.0/0.11.1/0.11.2` 的元数据声明 `Requires-Python >=3.12`，pip 因此忽略所有 0.11.x 版本；该镜像源可用最高版本仅为 0.10.2，无法满足 `jax==0.11.2` 这一精确约束，pip 解
+
+**修复方法**: jax 0.11.2 要求 Python >=3.12，而基础镜像 `openeuler/openeuler:24.03-lts-sp4` 自带的 Python 为 3.11.6 且官方源中无 `python3.12` 包，导致 `pip install jax==0.11.2` 解析失败。修复方式为在构建阶段从源码编译 Python 3.12 并用其安装 jax。
+
+**历史案例**:
+- PR #4715: `HPC/jax/0.11.2/24.03-lts-sp4/Dockerfile` — jax 0.11.2 要求 Python >=3.12，而基础镜像 `openeuler/openeuler:24.03
