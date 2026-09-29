@@ -2,52 +2,54 @@
 
 ## 基本信息
 - PR: #3234 — docs: add automated new-image request guide
-- 失败类型: `lint-error`（appstore 发布规范静态路径校验失败；存在工具误报可能）
+- 失败类型: `lint-error`
 - 置信度: 中
-- 知识库匹配: 模式11（YAML / 元数据文件错误 —— 含 `.claude/README.md` 等 appstore 路径校验同类历史案例）
-- 新模式标题: (命中已有模式，不填)
-- 新模式症状关键词: (命中已有模式，不填)
+- 知识库匹配: 模式11（YAML / 元数据文件错误——appstore 路径校验类）
+- 新模式标题: (不适用)
+- 新模式症状关键词: (不适用)
 
 ## 根因分析
 
 ### 直接错误
 ```
-2026-09-15 09:16:31,262-.../eulerpublisher/update/container/app/update.py[line:273]-ERROR:
-There are some specification errors for releasing on appstore in this PR, please check as above.
-
+2026-09-15 09:16:26,553-.../eulerpublisher/update/container/app/update.py[line:356]-INFO: Difference: [
+    "README.md"
+]
+2026-09-15 09:16:31,262-.../eulerpublisher/update/container/app/update.py[line:273]-ERROR: There are some specification errors for releasing on appstore in this PR, please check as above.
 +-------------+-----------------------------------------------------+--------------+
 | Check Items |                     Description                     | Check Result |
 +-------------+-----------------------------------------------------+--------------+
 |  README.md  | [Path Error] The expected path should be /README.md |   FAILURE    |
 +-------------+-----------------------------------------------------+--------------+
-
-2026-09-15 09:16:26,553-.../update.py[line:356]-INFO: Difference: [
-    "README.md"
-]
+Build step 'Execute shell' marked build as failure
+Finished: FAILURE
 ```
 
 ### 根因定位
-- 失败位置: `eulerpublisher/update/container/app/update.py:273`（`_check_specification` 类逻辑；日志行 356 为 diff 计算、行 222 为 fork 仓库 clone 成功）
-- 失败原因: CI 侧 appstore 发布规范预检在解析本次 PR 变更文件列表（`Difference: ["README.md"]`）后，判定 `README.md` 的路径不符合发布规范——期望路径为 `/README.md`，而 PR 中该文档以根目录相对路径 `README.md` 提交，`[Path Error]` 校验返回 FAILURE，最终 `Execute shell marked build as failure`。
+- 失败位置: `eulerpublisher/update/container/app/update.py:273`（appstore 发布规范校验），差异检测位于 `update.py:356`
+- 失败原因: 本 PR 的变更集为 `["README.md"]`，CI 的 appstore 发布规范预检对该 README.md 报 `[Path Error] The expected path should be /README.md`，判定路径不符合规范，导致整个构建失败。与知识库模式11中 `.claude/agents/README.md` / `.claude/README.md` 的 appstore 路径校验失败同源。
 
 ### 与 PR 变更的关联
-- 本 PR 为**纯文档变更**，diff 仅新增 README.md 中 12 行「新增应用镜像 Issue 自动化指南」，未新增/修改任何镜像目录、Dockerfile 或元数据。
-- CI 触发方式为 `trigger by note`（PR 评论触发），`update.py` 对该 PR 的 diff 做发布规范校验，唯一变更文件 `README.md` 被纳入校验并报路径错误。因此**失败由本次 README.md 变更直接触发**。
-- 但需注意：根目录 README.md 是仓库主文档，本不应作为某个镜像的发布文档参与 appstore 规范校验。报错文案「期望路径应为 `/README.md`」与实际路径 `README.md` 仅差前导斜杠，**高度疑似工具路径归一化缺陷导致的误报**（infra/tooling），也可能该预检要求文档路径必须带前导 `/` 的绝对形式。此点无法仅凭当前日志定论。
+- 本 PR 为**纯文档变更**，仅修改仓库根目录 `README.md`（新增「通过 Issue 自动化新增应用镜像」指南），新增 12 行、删除 0 行。
+- appstore 发布规范校验把变更文件 `README.md` 当作待发布产物进行路径合规检查，从而报错。即失败是本 PR 触碰 `README.md` 这一文件路径直接触发，而非由文档内容或 Dockerfile/构建逻辑引起。
+- 日志中 `Difference: ["README.md"]` 与检查表 `README.md` 一一对应，可确认失败点是该 README 文件本身。
 
 ## 修复方向
 
 ### 方向 1（置信度: 中）
-按 appstore 发布规范调整文档存放/命名，使被校验的文档路径与规范期望一致；若根目录 README.md 不在规范允许校验范围内，应将新增指南内容放置到规范约定的文档路径（如既有同类文档所在目录），避免由根 README 触发 appstore 发布预检。
+调整该文档的存放位置/形态，使其不落入 appstore 发布规范校验所禁止的路径。由于该校验似乎要求变更文件位于合法镜像目录结构内，而本 PR 只改动仓库根 `README.md`，可考虑将新增的「new-image 请求指南」内容放到校验允许的位置（例如与镜像文档同级的约定目录），或将该文档拆分为校验白名单内的路径，避免以根 `README.md` 作为唯一变更文件提交。
 
 ### 方向 2（置信度: 低）
-若确认 `README.md` 与 `/README.md` 仅前导斜杠差异为 CI 工具（`update.py` appstore 路径校验）归一化 bug，则属 **infra-error**，与 PR 文档内容无关，Code Fixer 无需改动 PR 正文，应转交 CI/工具维护方修复校验逻辑。
+若确认该校验对「纯文档 PR」存在误判（即根 `README.md` 本应被允许），则属于 CI 编排/校验工具问题，建议由 CI 维护方将该类文档路径加入白名单，Code Fixer 无需改动 Dockerfile 或构建逻辑。
 
 ## 需要进一步确认的点
-- `eulerpublisher/update/container/app/update.py` 第 273 行附近产生 `[Path Error] The expected path should be /README.md` 的判定规则：期望路径的构造方式与比较逻辑（是否强制前导 `/`、是否只允许特定目录下的文档）。
-- appstore 发布规范是否允许根目录 `README.md` 变更；纯文档 PR 是否应跳过该预检。
-- `Difference` 是否仅统计本次 diff，是否存在将根文档误判为镜像文档的路径匹配规则。
-- 若方向 1 成立，需确认本项目规范中「新增指南类文档」的合法存放路径（例如现有同类文档的实际目录）。
+1. `eulerpublisher/update/container/app/update.py` 中 appstore 规范校验的路径白名单/合法路径规则，确认 `README.md` 被判定为 `[Path Error]` 的确切条件（是要求位于镜像目录内，还是要求带前导 `/`）。
+2. 判断该校验是否对所有 PR 生效：纯文档 PR 修改根 `README.md` 是否必然失败，还是仅在同时存在镜像变更时才触发。
+3. 历史上 `.claude/README.md`（放置于 `.claude/` 根层级）被要求满足的「期望路径」规则，与本例期望 `/README.md` 的规则是否一致。
+4. 该 PR 是否本应作为「镜像发布 PR」被校验；若不是，需确认 CI 的 diff 检测为何将根 README 纳入发布校验范围。
+
+> 证据说明：日志仅暴露到校验失败的表层信息，未能给出该校验对 `README.md` 期望路径为 `/README.md` 的完整判定逻辑，故置信度标注为「中」，方向 1/2 均需 code-fixer 先核实校验规则后再提交。
 
 ## 修复验证要求
-不适用（本失败未涉及正则 patch 第三方/上游源文件）。
+本修复方向涉及对 CI 路径校验规则的理解，但不涉及正则 patch 外部源文件，故无强制上游文件验证要求。
+若 Code Fixer 选择修改文档存放路径，需在提交前确认新路径能通过 appstore 规范校验（即以 CI 同款校验逻辑复核路径合法）；若判定为校验工具误判，则不应改动本仓库文件。
