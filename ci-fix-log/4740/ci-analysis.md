@@ -2,60 +2,59 @@
 
 ## 基本信息
 - PR: #4740 — ceph容器镜像升级至21.3.0版本.
-- 失败类型: infra-error（证据不足）
+- 失败类型: `infra-error`（证据不足，无法定位真实失败）
 - 置信度: 低
-- 知识库匹配: 模式42
-- 新模式标题: (不适用)
-- 新模式症状关键词: (不适用)
+- 知识库匹配: 模式19（证据不足 / 无法定位根因），亦与模式42（日志缺失无法定位）同类
+- 新模式标题: （不适用）
+- 新模式症状关键词: （不适用）
 
 ## 根因分析
 
 ### 直接错误
-上下文中的 `ci.logs` 未提供：
+本次上下文的 `ci.logs` 字段为：
 
 ```
-"ci": {
-  "run_info": "(not available)",
-  "logs": "(not available — analyze based on PR diff only)"
-}
+(not available — analyze based on PR diff only)
 ```
 
-因此**无法从日志中提取任何错误信息**，也无法确认失败发生的阶段（预检、构建、check、推送）。
+`ci.run_info` 同样为 `(not available)`。**没有任何可供分析的 CI 日志或运行信息**，因此不存在可引用的报错堆栈、编译输出或测试输出。
 
 ### 根因定位
-- 失败位置: 未知（CI 日志缺失）
-- 失败原因: 无法确认。日志完全缺失，不能定位到具体文件、行号或命令。
+- 失败位置: 未知（日志缺失，无法判定架构/构建阶段）
+- 失败原因: 无法确认。仅凭 PR diff 无法判断失败是发生在 Docker 构建的哪个阶段（dnf 安装、libnbd 编译、ceph cmake 配置、ninja 编译、还是运行阶段的容器启动检查）。
 
 ### 与 PR 变更的关联
-本次 PR 为纯新增内容：
-- 新增 `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile`（基于 openEuler 24.03-LTS-SP4 源码构建 ceph v21.3.0）
-- 新增 `Storage/ceph/21.3.0/24.03-lts-sp4/entrypoint.sh`（单节点 ceph 集群启动脚本）
-- 更新 `Storage/ceph/README.md`、`Storage/ceph/doc/image-info.yml`、`Storage/ceph/meta.yml`（登记新版本）
+无法判定。PR 新增了以下内容，但由于缺少日志，**不能**将任何一项认定为失败根因：
 
-由于缺少日志，**无法判断失败是否由上述改动触发**。仅从 diff 推断，理论上存在若干可导致构建/校验失败的候选点（均未经日志证实，不能作为结论）：
+1. `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile`（新增，55 行）
+   - `git clone -b v${VERSION} --recursive --depth 1 https://github.com/ceph/ceph.git`，其中 `VERSION=21.3.0`。若上游 `ceph/ceph` 仓库不存在 `v21.3.0` 标签，克隆会报 `Remote branch v21.3.0 not found`（参见模式02、模式22），但目前无日志佐证。
+   - `ninja -j2` 并行度较低，且 ceph 为大型 C++ 工程，存在编译超时或内存耗尽（OOM）的可能，同样无日志佐证。
+   - `ENV LD_LIBRARY_PATH=/usr/local/lib64:$LD_LIBRARY_PATH` 自引用未定义变量，可能触发 BuildKit `UndefinedVar` 警告（模式20）。该警告通常为非致命，**不应**在无日志的情况下被当作根因。
+   - `dnf install` 依赖清单较长，`nasm`、`librdkafka`、`grpc-plugins` 等包在 24.03-lts-sp4 仓库中是否全部可用未经验证。
+2. `Storage/ceph/21.3.0/24.03-lts-sp4/entrypoint.sh`（新增，72 行，文件末尾无换行）——运行阶段脚本。
+3. `Storage/ceph/README.md`、`Storage/ceph/doc/image-info.yml`、`Storage/ceph/meta.yml`——文档/元数据更新（`meta.yml` 新增条目末尾无换行）。
 
-1. **上游版本 tag 可能不存在**：Dockerfile 使用 `git clone -b v${VERSION}`（VERSION=21.3.0）克隆 `https://github.com/ceph/ceph.git`，若 `v21.3.0` tag 不存在会 clone 失败（类比模式02/模式22）。
-2. **构建依赖可能缺失**：ceph 源码构建依赖较多，`do_cmake.sh`/`ninja` 阶段可能因缺 `-devel` 包或 cmake 配置失败（类比模式10）。
-3. **元数据一致性校验**：新增了 `meta.yml`、`image-info.yml`、README 条目，若路径/格式与仓库 CI schema 不一致可能触发预检失败（类比模式11/模式29）。
-4. **构建耗时长/资源不足**：`ninja -j2` 源码编译 ceph 体积巨大，可能超时（`timeout`）。
-5. **基础镜像偶发网络问题**：clone gitlab/github、dnf 安装过程的网络波动（infra）。
-
-以上 1–4 均为 **diff 层面的可能性枚举，非日志证据**，禁止据此直接修复。
+> 说明：按诊断约束，在日志缺失时不得把上述 diff 中的任何可疑点直接作为失败根因，它们仅作为待验证的排查方向。
 
 ## 修复方向
 
-### 方向 1（置信度: 低）
-**先获取真实失败日志**。在没有任何 `ci.logs` 的情况下，唯一正确的下一步是补齐失败 job 的日志（参见下方确认点），再据此判定失败类型和根因。在此之前不做任何 Dockerfile/entrypoint 修改。
+**本次不提供确定性修复方向**，因为缺少 CI 日志，任何修复都属于猜测。为避免 Code Fixer 误改，建议先按"需要进一步确认的点"补齐日志后再定位。
 
-### 方向 2（可选，置信度: 低）
-若确认日志缺失且 PR 长期处于 `ci_failed`，可将其按 `infra-error` 处理（CI 基础设施/日志采集问题），Code Fixer 无需改动代码。
+### 方向 1（置信度: 低）
+若后续确认失败发生在 `git clone`/`git checkout` 阶段，优先核实 ceph 21.3.0 对应上游 tag 的真实命名与存在性（`v21.3.0` vs `21.3.0` vs 其他），再决定修复方式。
+
+### 方向 2（置信度: 低）
+若后续确认失败发生在编译/链接或超时阶段，需结合具体报错判断是补充构建依赖、调整并行度，还是属于架构相关问题。
 
 ## 需要进一步确认的点
-1. 获取失败场景下的完整 CI 日志（`ci.logs`），确认失败发生在预检(PR-check)、Build、Push 还是 Check 阶段。
-2. 确认失败具体在哪个 job（x86-64 / aarch64）以及对应下游 job 日志路径，例如 `/job/x86-64/…`、`/job/aarch64/…`。
-3. 确认 `https://github.com/ceph/ceph.git` 是否存在 tag `v21.3.0`，以及该版本是否已正式发布。
-4. 确认 `ci.run_info` 中 workflow 名称与是否有 `ci_failed` 标签/说明。
-5. 确认新增的 `meta.yml` / `image-info.yml` / README 条目是否通过 CI 路径与格式校验（新增 Dockerfile 路径为 `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile`，符合 `{image-version}/{os-version}/Dockerfile` 两级规范，暂未发现路径层级问题）。
+1. **获取失败 job 的完整日志**：当前仅拿到 trigger/编排层信息，`ci.logs` 为空。需要提供真正失败的下游构建 job 日志（如 `/job/x86-64/…` 与 `/job/aarch64/…`），或运行阶段 `[Check]` 的容器启动检查日志。
+2. **确认失败的架构**：本 PR 声明支持 `amd64, arm64`，但 `meta.yml` 新增条目未设置 `arch` 约束。需确认失败发生在哪个架构 runner，判断是否为架构相关问题。
+3. **确认失败阶段**：是 Dockerfile 构建失败，还是 `entrypoint.sh` 容器启动自检失败（参见模式25 容器启动后立即退出）。`entrypoint.sh` 末尾缺少换行、且以交互式 `ceph-mon ... &` 后台启动后 `sleep 3` 判断进程，运行阶段存在不确定性。
+4. **核实上游 tag**：确认 `https://github.com/ceph/ceph` 是否存在 `v21.3.0` 标签。
+5. **核实依赖可用性**：确认 24.03-lts-sp4 仓库中 Dockerfile 所列全部 `dnf install` 包名均存在。
 
 ## 修复验证要求
-本报告置信度为「低」，且无日志证据。在获得真实 CI 日志之前，**禁止** code-fixer 依据本报告对 Dockerfile 或 entrypoint.sh 做任何修改。若后续基于真实日志确定修复方向涉及修改正则/patch 或上游源文件，code-fixer 必须先拉取对应上游版本（以 Dockerfile 中 `ARG VERSION` 为准）的实际内容进行验证后再提交。
+不适用（本次未提出涉及正则 patch 外部源文件的修复方向）。若后续在证据补齐后确定为上游 tag/URL 相关修复，Code Fixer 必须先访问上游仓库确认目标 tag/路径真实存在，再行提交。
+
+## 结论
+由于 `ci.logs` 与 `ci.run_info` 均不可用，**证据不足，无法确定根因**。本报告不应被视为对真实失败原因的判定；请补充下游构建 Job 日志后重新诊断。
