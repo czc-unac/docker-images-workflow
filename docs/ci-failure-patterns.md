@@ -439,6 +439,7 @@ COPY --from=agent-source /bin/grafana-agent /usr/local/bin/grafana-agent
 - PR #2489: `AI/diskann/0.52.0` — VERSION 变量引用方式有误（diff 推断）
 - PR #2308: `AI/diskann/README.md` — 纯文档修正
 - PR #1768: `Others/spring-cloud/5.0.0` — Dockerfile 重写，具体错误信息缺失
+- PR #4717: `Cloud/qemu/11.1.2/24.03-lts-sp4/Dockerfile` — `Cloud/qemu/11.1.2/24.03-lts-sp4/Dockerfile` 中构建版本被写成了 `11.1
 
 ---
 
