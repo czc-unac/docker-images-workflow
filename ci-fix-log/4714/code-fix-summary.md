@@ -1,25 +1,16 @@
 # 修复摘要
 
 ## 修复的问题
-本次 CI 失败被判定为 `infra-error`（BuildKit 构建器被优雅关闭），与 PR 变更无直接因果关系，无需进行代码修改。
+本次 CI 失败为 `infra-error`（buildx 构建器容器 `euler_builder_20260929_082519` 与 BuildKit daemon 通信被 `graceful_stop`/EOF 中断，随后 builder 被移除），与 PR 代码无关，无需修改代码。
 
 ## 修改的文件
-- 无（未修改任何文件）
+- 无（本次未对源码做任何改动）
 
 ## 修复逻辑
-CI 失败分析报告指出：失败发生在 aarch64 构建 job 的 `pip install torch torchvision` 步骤期间，客户端与 BuildKit daemon 的 gRPC 连接收到 `goaway ... graceful_stop`，随后提示 builder `euler_builder_20260929_082519` 不存在。这是构建基础设施层面的临时中断，并非 Dockerfile 内容触发的编译/依赖/语法错误。
-
-核对当前仓库文件 `AI/torchvision/0.29.0/24.03-lts-sp4/Dockerfile`，其内容结构正常：
-- `dnf install -y libpng libjpeg-turbo python3-pip` 成功；
-- `pip install` 的依赖解析与下载均成功，无 `ResolutionImpossible` / 依赖冲突；
-- `ARG TORCH_VERSION=2.14.0`、`ARG VERSION=0.29.0`。
-
-分析报告中提到的证据链偏差（pr.diff 显示 `TORCH_VERSION=2.12.1`，实际构建为 `torch==2.14.0`）经核对：当前分支 Dockerfile 中真实值为 `2.14.0`，与失败日志一致，不存在需要修正的版本不一致问题。
-
-因此按报告结论，Code Fixer 不做任何代码改动，建议直接重新触发 CI / 重跑该 job。
+1. 复核分析报告指出的"版本不一致"疑点：当前分支 `AI/torchvision/0.29.0/24.03-lts-sp4/Dockerfile` 第 4 行为 `ARG TORCH_VERSION=2.14.0`，与 `ci.logs` 中实际安装的 `torch==2.14.0` 一致（分析报告所依据的 `2.12.1` 为旧版本，本分支已修正）。
+2. 通过上游验证 torchvision 0.29.0 与 torch 版本匹配关系：拉取 `https://raw.githubusercontent.com/pytorch/vision/v0.29.0/setup.py`，其中 `TORCH_TARGET_VERSION = "0x020e000000000000"`，按 PyTorch 版本编码高字节 `0x02`=major 2、`0x0e`=minor 14，即目标 torch 为 **2.14.0**，与 Dockerfile 中 `TORCH_VERSION=2.14.0` 完全一致。
+3. CI 日志显示 `torch==2.14.0`、`torchvision==0.29.0` 及全部传递依赖均已成功解析并下载（torch 159.2 MB、torchvision 2.1 MB），进入 `Installing collected packages` 阶段，**未出现 `ResolutionImpossible` 或任何 pip 报错**，唯一错误为 BuildKit 构建器失联。故依赖配置正确，失败属基础设施故障。
+4. 依据分析报告"方向 1"及流程要求，infra-error 不做代码修改，重跑流水线即可。
 
 ## 潜在风险
-无。未修改任何代码，不影响其他功能。
-
-## 后续建议
-若重跑后仍在同一 `pip install` 步骤稳定失败，需补充确认：构建节点磁盘/内存水位、是否存在并发 job 共用/清理同一 buildx builder、以及 CI 对 buildx builder 的超时/生命周期回收策略，再决定是否需要修复动作。
+无。未改动任何源文件，不引入回归风险。建议重跑 CI；若构建器反复消失，需在运维侧排查 aarch64 runner 上 docker/buildkit 的稳定性与资源（磁盘、内存、构建器生命周期/清理策略）。
