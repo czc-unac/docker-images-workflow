@@ -791,3 +791,21 @@ RUN sed -i 's/#define HAS_RGBTOUVMATRIXROW_NEON/\/\/#define HAS_RGBTOUVMATRIXROW
 
 **历史案例**:
 - PR #4715: `HPC/jax/0.11.2/24.03-lts-sp4/Dockerfile` — jax 0.11.2 要求 Python >=3.12，而基础镜像 `openeuler/openeuler:24.03
+
+---
+
+## 模式44：getdeps构建失败
+
+**症状关键词**: getdeps.py, exit code 1, fbthrift, libaio, _verify_hash, Dockerfile:18
+
+**根因**: - 失败位置: `Others/fbthrift/2026.09.28.00/24.03-lts-sp4/Dockerfile:18-23`（`getdeps.py build fbthrift` 步骤）
+- 失败原因: `getdeps.py` 构建 fbthrift 时返回退出码 1，但**日志中没有出现导致失败的第一条真实错误**
+  （无 Python traceback、无编译器错误、无 CMake Error、无下载/校验报错），提供的 `ci.logs` 是被截断且
+  stdout/stderr 交错刷新的片段，无法据此确定失败的具体依赖或编译单元。
+
+**修复方法**: fbthrift `2026.09.28.00` 镜像在 `getdeps.py ... build fbthrift` 阶段失败（两架构均 `exit code: 1`），
+真正根因是 openEuler 发行版未被 getdeps 识别（`distro_family=None`），导致 `openssl` 依赖既无法命中系统包、
+也无法命中下载/构建 fetcher，抛出 `KeyError`。
+
+**历史案例**:
+- PR #4724: `Others/fbthrift/2026.09.28.00/24.03-lts-sp4/Dockerfile` — fbthrift `2026.09.28.00` 镜像在 `getdeps.py ... build fbthrift`
