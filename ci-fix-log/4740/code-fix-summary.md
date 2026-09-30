@@ -1,17 +1,21 @@
 # 修复摘要
 
 ## 修复的问题
-本次 CI 失败被分析报告判定为 `infra-error`（日志缺失，证据不足），未做任何代码修改。
+CI 失败被判定为 `infra-error`（基础设施问题 / 证据不足），未做任何代码修改。
 
 ## 修改的文件
 - 无（未修改任何文件）
 
 ## 修复逻辑
-1. CI 失败分析报告明确指出：本次上下文中**未提供任何 CI 日志**（`ci.logs`、`ci.run_info` 均不可用），失败类型为 `infra-error`，置信度低，无法定位到任何代码类根因。
-2. 报告"需要进一步确认的点"第 4 条明确要求："在拿到日志前，**不应**要求 Code Fixer 做任何修改；当前失败可能为基础设施/日志缺失问题（infra-error），与 PR 代码无必然关联。"
-3. 按角色约束"如果分析报告指出是 infra-error（CI 基础设施问题），在 output_file 中说明无需代码修改，不要强行改代码"，故本次不做任何改动，避免在无证据情况下猜测性修改已包含多轮修复的 PR 代码。
-4. 补充核实：报告建议核对的"上游 `github.com/ceph/ceph` 是否存在 tag `v21.3.0`"已通过 GitHub API 验证——`refs/tags/v21.3.0` 确实存在（SHA `cc6b5e2da077eadb8bc32a25e1a33143da0b9bdb`），因此 `git clone -b v21.3.0` 的 tag 引用本身不是失败根因。
-5. 当前 PR 分支已包含此前针对沙箱/基础设施限制的修复提交（降并发 `ninja -j2`、关闭 dashboard 前端构建、关闭 jaeger/opentelemetry 构建），本次不再叠加改动。
+1. 本次 CI 分析报告明确给出失败类型为 `infra-error`，置信度**低**，且 `ci.logs` 与 `ci.run_info` 均未提供，无法定位失败的 job 名称、退出码或第一条真实错误。报告本身要求“在获得完整失败日志前不得假设修复方向成立，也不应据本报告的潜在风险点提交修改”。
+2. 依据工作约束，当分析报告判定为 `infra-error` 时不应强行改代码，因此本次不实施任何改动。
+3. 对报告中列出的三个“潜在风险点”逐一做了核对，均不成立，故不构成修复依据：
+   - **ENV 自引用未定义变量**：`ENV LD_LIBRARY_PATH=/usr/local/lib64:$LD_LIBRARY_PATH`（`Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile:48`）与仓库内已正常发布的 `20.3.0` 各镜像（如 `Storage/ceph/20.3.0/24.03-lts-sp4/Dockerfile`）完全一致，属既有且被接受写法，非本次新增缺陷。
+   - **版权/许可头缺失**：新增的 `Dockerfile`、`entrypoint.sh` 以及 `README.md`、`doc/image-info.yml`、`meta.yml` 均无 Copyright/SPDX 头，但同目录既有 `20.3.0` 文件同样没有，且本仓库其他镜像亦如此，说明仓库 CI 未强制该头，非本次失败根因。
+   - **上游 tag / 构建依赖风险**：`Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile:41` 使用 `git clone -b v${VERSION}`（`VERSION=21.3.0`），能否构建成功需日志佐证，属推测，不能据此改动。
+4. 分支 `fix/4740` 上已有针对构建问题的历史修复提交（限制 `ninja` 并行度、关闭 dashboard frontend、关闭 jaeger/opentelemetry 等），本次无新日志可判断仍需追加修复。
+
+结论：无需代码修改，应补充失败 job 的完整 `ci.logs`/`ci.run_info` 后重新分析；若确认属于构建阶段失败，再依据第一条真实错误进行最小化修复。
 
 ## 潜在风险
-无。本次未修改任何源码，不会影响构建或运行行为。
+无。本次未改动任何代码，不会引入新风险。若后续拿到日志后仍无法复现或确认为基础设施抖动，建议重跑 CI 或联系基础设施维护方处理。
