@@ -1,34 +1,26 @@
 # 修复摘要
 
 ## 修复的问题
-无需修改代码。CI 失败分析报告将本次失败判定为 `infra-error`（证据不足，`ci.logs` 与 `ci.run_info` 均缺失），无法定位真实根因，故未做任何代码改动。
+无需代码修改。本次 CI 失败被判定为 `infra-error`（证据不足），CI 日志缺失，无法定位根因，故不执行任何代码改动。
 
 ## 修改的文件
-- 无（未修改任何文件）
+- 无
 
 ## 修复逻辑
-分析报告明确指出：失败类型为 `infra-error`，置信度低，缺少失败 job 的完整构建日志，无法区分是编译失败、依赖问题、启动 check 还是预检/编排阶段问题。按任务约定，`infra-error` 不应强行修改代码。
+CI Failure Analyst 的报告将失败类型判定为 `infra-error`，置信度为“低”，知识库模式 42（日志缺失无法定位），兼与模式 19（证据不足）一致：
 
-为排除报告"方向 2"中列出的 5 个 diff 级静态风险点，已在源码库中逐一核实，结论如下：
+- 上下文 `ci.logs` 为空（值为 `"(not available — analyze based on PR diff only)"`），`ci.run_info` 为 `(not available)`，没有任何可用的失败日志。
+- 报告中也不存在 `Finished: SUCCESS` / `Build successful` 等成功标志，无法据此判断失败发生在未提供的下游 job。
+- 报告明确要求：“code-fixer 在获得有效 CI 日志前不应执行任何修改。”
 
-1. **许可证头缺失（疑似 `check_package_license`）— 已排除**：
-   同目录既有构建文件 `HPC/cp2k/2024.3/24.03-lts/Dockerfile`、`HPC/cp2k/2025.2/24.03-lts-sp2/Dockerfile`、`HPC/cp2k/2025.2/24.03-lts-sp4/Dockerfile` 同样首行为 `ARG BASE=...`，均无 Copyright/SPDX 头。既有文件可正常构建/合并，说明该检查并未对本路径强制要求许可头，属于误报，不应新增头（否则与同类文件风格不一致）。
-
-2. **上游 `support/v2026.2` 分支不存在 — 已排除**：
-   通过 `git ls-remote --heads https://github.com/cp2k/cp2k.git` 实际查询，确认上游存在 `refs/heads/support/v2026.2`（commit 67b5da876dd6a76b8b021d5a04d1c81ba79a4c50），`git clone -b support/v2026.2` 可正常解析。
-
-3. **工具链安装脚本参数不兼容 — 已排除**：
-   已从上游按实际 tag/branch 拉取 `support/v2026.2/tools/toolchain/install_cp2k_toolchain.sh`（1609 行）并核对。Dockerfile 中使用的全部选项（`--install-all`、`--enable-cuda=no`、`--with-deepmd`、`--target-cpu`、`--with-cusolvermp`、`--with-libtorch`、`--with-gcc`、`--with-openmpi`、`--with-sirius`、`--with-elpa`、`--with-plumed`、`--with-libvori`、`--with-cosma`、`--with-libsmeagol`、`--with-dftd4`、`--with-tblite`、`--with-trexio`、`--with-greenx`、`--with-gmp`、`--with-spfft`、`--with-spla`、`--with-gsl`、`--with-spglib`、`--with-hdf5`、`--with-libvdwxc`）在 2026.2 脚本的参数解析分支（约 793–975 行）及 `--help` 说明中均有定义，未被移除，不会触发 `Unknown flag`。
-
-4. **`HPC/image-list.yml` 未登记 cp2k — 已排除**：
-   `HPC/image-list.yml` 第 5 行已存在 `cp2k: cp2k` 条目，无需新增；且该文件不在 `pr.changed_files` 允许修改范围内。
-
-5. **文件末尾无换行 — 非构建失败因素**：
-   同类既有 Dockerfile/文档同样如此，属仓库既有格式，不影响 Docker 构建或启动 check。
-
-此外，对比 2026.2 与 2025.2 的 Dockerfile，二者仅有 `ARG VERSION`（2025.2→2026.2）与安装包列表新增 `xz` 两处差异，改动合理且最小（`xz` 为解压依赖）。新增的 README.md / doc/image-info.yml / meta.yml 内容与版本信息一致，tag 表、meta.yml 路径条目均已正确补充。
-
-综上，本次 PR 的四类改动均无明显缺陷，现有证据不足以支撑任何代码级修复。建议补充失败 job 的完整 `ci.logs`（含最早 ERROR / exit code 行、失败阶段、失败架构）后重新分析，而非在缺少日志的情况下盲改 Dockerfile。
+因此本次仅能确认“日志整体缺失”，无法建立 PR 改动与失败之间的因果关系，任何修改都属于盲目改动，违反最小化原则。故不修改 `pr.changed_files` 中的任何文件。
 
 ## 潜在风险
-无代码改动，无引入新风险。若后续拿到真实日志确认属于上游 cp2k 2026.2 工具链行为变更（例如某默认依赖在 `--install-all` 下被要求联网或编译失败），需再单独定位并修复。
+无（未做任何代码修改）。
+
+## 待确认事项（供后续 CI 重跑/日志获取后处理，非本次修复）
+1. 必须获取失败 job 的实际日志，否则无法进行根因判定。
+2. 确认失败发生在 trigger/编排层还是下游架构构建 job（x86-64 / aarch64）。
+3. 确认上游 `cp2k/cp2k` 是否存在 `support/v2026.2` 分支（对应 Dockerfile 第 11 行 `git clone -b support/v2026.2`）。
+4. 确认 `HPC/cp2k/meta.yml` 的 `2026.2-oe2403sp4` 条目是否需要补充 `arch` 字段（当前条目未声明 `arch`；cp2k 本身支持 amd64/arm64，故本身未必是问题）。
+5. 若后续确认是构建阶段失败，再排查 `install_cp2k_toolchain.sh --install-all` 在 openEuler 24.03-LTS-SP4 下是否缺依赖。
