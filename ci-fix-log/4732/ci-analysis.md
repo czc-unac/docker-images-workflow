@@ -2,72 +2,73 @@
 
 ## 基本信息
 - PR: #4732 — 【自动升级】ceph容器镜像升级至21.3.0版本.
-- 失败类型: `lint-error`（候选，证据不足）
+- 失败类型: `lint-error`（低置信度，基于 diff 推断；亦无法排除 `runtime-error` / `build-error`）
 - 置信度: 低
-- 知识库匹配: 模式17（候选）
-- 新模式标题: (不适用)
+- 知识库匹配: 模式17（Copyright / SPDX 声明缺失）+ 模式42（日志缺失无法定位）
+- 新模式标题: (不适用，匹配已有模式)
 - 新模式症状关键词: (不适用)
+
+> 证据状态说明：上下文 `ci.logs` 为 `(not available — analyze based on PR diff only)`，
+> `ci.run_info` 为 `(not available)`。**没有可用的 CI 日志**，无法执行日志扫描、无法定位
+> 第一条真实错误，也无法确认失败发生在 x86-64 / aarch64 下游构建 job 还是预检阶段。
+> 因此本报告所有结论均为**基于 PR diff 的推断**，需以下游 job 日志验证。
 
 ## 根因分析
 
 ### 直接错误
-本次上下文中 `ci.logs` 为 `(not available — analyze based on PR diff only)`，
-`ci.run_info` 为 `(not available)`。**没有任何 CI 日志可供引用**，因此无法复制
-任何“最早出现的错误信息”。失败类型只能基于 PR diff 推断，属于**证据不足**。
+无可用日志，无法复制错误信息。
+
+```
+ci.logs: (not available — analyze based on PR diff only)
+ci.run_info: (not available)
+```
 
 ### 根因定位
-- 失败位置: 未知（无日志）
-- 失败原因: 无法从日志确认。基于 diff 的候选根因见下。
+- 失败位置: 未知（日志缺失）
+- 失败原因: 无法确认。仅能从 diff 推断可能的预检失败或运行时失败点。
 
 ### 与 PR 变更的关联
-本 PR 为自动升级类改动，新增 `Storage/ceph/21.3.0/24.03-lts-sp4/` 目录，并修改
-`Storage/ceph/meta.yml`、`Storage/ceph/README.md`、`Storage/ceph/doc/image-info.yml`。
-基于 `pr.diff`，存在以下**可能**触发 CI 失败的候选原因（按可能性排序，均无法证实）：
+本 PR 新增/修改如下文件：
+- 新增 `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile`（无 Copyright / SPDX 头）
+- 新增 `Storage/ceph/21.3.0/24.03-lts-sp4/entrypoint.sh`（无 Copyright / SPDX 头）
+- 修改 `Storage/ceph/README.md`、`Storage/ceph/doc/image-info.yml`、`Storage/ceph/meta.yml`
 
-**候选 1 — 新增文件缺少 Copyright / SPDX 版权头（对应模式17）**
-- `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile`（新增）
-- `Storage/ceph/21.3.0/24.03-lts-sp4/entrypoint.sh`（新增）
-- `Storage/ceph/README.md`、`Storage/ceph/doc/image-info.yml`、`Storage/ceph/meta.yml`（修改）
-
-diff 中上述文件均未出现 `# Copyright (c) Huawei Technologies Co., Ltd. ...` 与
-`# SPDX-License-Identifier: MulanPSL-2.0` 头。若项目 CI 启用 `check_package_license`
-预检，新增文件会因此失败（知识库模式17 历史案例：PR #2516）。
-
-**候选 2 — 上游 ceph 版本 tag `v21.3.0` 可能不存在（对应模式02/18）**
-Dockerfile 使用 `git clone -b v${VERSION} --recursive --depth 1 https://github.com/ceph/ceph.git`
-（`VERSION=21.3.0`）。README 中记录当前版本为 20.3.0，若上游尚未发布 `v21.3.0` tag，
-则 `git clone` 返回 `Remote branch ... not found`，构建失败。需核实上游 tag。
-
-**候选 3 — `ENV` 自引用未定义变量（对应模式20）**
-Dockerfile 末尾 `ENV LD_LIBRARY_PATH=/usr/local/lib64:$LD_LIBRARY_PATH` 自引用尚未定义的
-`$LD_LIBRARY_PATH`，触发 BuildKit `UndefinedVar` 警告。若 CI 将 Docker lint 警告视为
-失败，则会在此处失败；否则仅为警告，不导致构建失败。
-
-**候选 4 — ceph 大体积源码编译可能超时（对应模式 timeout）**
-Dockerfile 全量 `//do_cmake.sh` + `ninja -j$(nproc)` 编译 ceph（含递归子模块），构建
-耗时较长，存在触发 CI 构建/执行超时的风险。
+可能触发失败的 diff 线索（均待日志确认）：
+1. **Copyright / SPDX 缺失（模式17）**：新增的 `Dockerfile`、`entrypoint.sh` 首个有效行分别是
+   `ARG BASE=...` 与 `#!/bin/bash`，均无 `Copyright ...` 与 `SPDX-License-Identifier` 头，
+   仓库 CI 的 `check_package_license` 易判失败。
+2. **entrypoint 运行时依赖缺失（可能 runtime-error）**：`entrypoint.sh` 使用 `pkill` 与 `pgrep`，
+   但 Dockerfile 的 `dnf install` 列表未包含提供这两个命令的包（openEuler 中为 `procps-ng`），
+   容器启动自检可能报 `command not found`。
+3. **`meta.yml` / `image-info.yml` 元数据一致性（模式11）**：新增 `21.3.0-oe2403sp4` 条目，
+   若场景级 `image-list.yml` 或校验 schema 需要同步，可能预检失败（diff 中未见相关文件变更）。
+4. **上游 tag 可用性（模式02，构建类）**：`git clone -b v${VERSION}` 拉取 `v21.3.0`，
+   该 tag 是否真实存在需从上游确认，无法在无网络/无日志下判定。
 
 ## 修复方向
 
-### 方向 1（置信度: 低）— 补齐版权头
-若失败由 `check_package_license` 引起，需为新增/修改文件补上项目要求的 Copyright 与
-SPDX-License-Identifier 头（Dockerfile/shell 用 `#` 注释，markdown 用 `<!-- -->`）。
-在未获取日志前不应直接实施。
+### 方向 1（置信度: 低）— 补齐开源声明头
+为新增的 `Dockerfile`、`entrypoint.sh` 添加仓库要求的 Copyright + SPDX 头（参考模式17），
+并确认修改后的 README/image-info.yml 不因缺少声明而触发 `check_package_license`。
 
-### 方向 2（置信度: 低）— 核实 ceph 21.3.0 上游 tag 是否存在
-若 `git clone -b v21.3.0` 报分支不存在，需确认 `ceph/ceph` 是否存在 `v21.3.0` tag，
-不存在则应改用实际存在的版本或调整版本策略。
+### 方向 2（置信度: 低）— 补齐 entrypoint 运行时依赖
+若失败发生在容器启动自检阶段，需在 Dockerfile 中补充提供 `pkill`/`pgrep` 的系统包
+（openEuler 24.03-LTS-SP4 上为 `procps-ng`）。
+
+### 方向 3（置信度: 低）— 核对元数据与上游版本
+核对 `v21.3.0` 是否存在于 `github.com/ceph/ceph`，并确认 `meta.yml`、
+`doc/image-info.yml` 与场景级 `image-list.yml` 条目一致、符合 CI schema。
 
 ## 需要进一步确认的点
-1. **必须获取本次失败的 CI 日志**（构建 job 的完整输出，包括预检阶段与 Docker build
-   阶段），当前上下文未提供任何日志，无法确定根因。
-2. 确认项目 CI 是否存在 `check_package_license` 预检、以及新增文件是否必须携带版权头。
-3. 确认上游 `https://github.com/ceph/ceph` 是否存在 `v21.3.0` tag。
-4. 确认 CI 是否配置了 Dockerfile lint（含 `UndefinedVar` 警告）并将其作为失败条件。
-5. 确认 `Storage/image-list.yml` 或场景级清单是否需要同步登记新镜像条目。
+1. **获取真实失败 job 日志**：若日志末尾出现 `Finished: SUCCESS` / `Build successful`，
+   则失败在未提供的下游架构 job（`/job/x86-64/…` 或 `/job/aarch64/…`），需取该 job 日志。
+2. 失败是否发生在预检阶段：确认 `check_package_license` 是否对新增 Dockerfile / entrypoint.sh 报缺失 Copyright/SPDX。
+3. 失败是否发生在容器启动自检：确认 `entrypoint.sh` 是否因 `pkill`/`pgrep` 不存在而退出。
+4. 确认 `Storage/ceph` 是否存在需同步更新的 `image-list.yml` 或 schema 校验。
+5. 确认上游 `github.com/ceph/ceph` 是否存在 `v21.3.0` tag，以及构建命令 `./do_cmake.sh` / `ninja` 是否在该 tag 下可用。
 
 ## 修复验证要求
-无（当前不涉及对外部源文件的正则 patch；且证据不足，不应在缺少日志的情况下实施修复）。
-
-> 说明：本报告因 `ci.logs` 缺失而无法按“最早错误信息”定位根因，全部结论均为基于 diff 的
-> 低置信度推断，属于证据不足情形。请补充 CI 失败 job 日志后重新分析。
+本报告置信度为**低**，code-fixer 不得直接套用上述方向。提交前必须：
+- 先取得下游（x86-64 / aarch64）失败 job 的日志，确认第一条真实错误后再修改；
+- 若确认为声明头问题，核对本仓库对 Dockerfile / shell 脚本的声明头格式要求；
+- 若确认为依赖缺失，从 openEuler 24.03-LTS-SP4 源验证所加包名确实提供目标命令。
