@@ -1,26 +1,25 @@
 # 修复摘要
 
 ## 修复的问题
-无需代码修改。本次 CI 失败被判定为 `infra-error`（证据不足），CI 日志缺失，无法定位根因，故不执行任何代码改动。
+修复 cp2k 2026.2 镜像构建失败：上游 CP2K 2026.2 已移除 Makefile 构建体系（不再生成 `install/arch/local.psmp`），Dockerfile 仍执行 `make ARCH=local VERSION=psmp`，导致 `cp: cannot stat './tools/toolchain/install/arch/local.psmp'` + `make: *** No targets specified and no makefile found.`，两个架构（x86-64 / aarch64）均在 `[build 7/8]` 步骤以 exit code 2 失败。
 
 ## 修改的文件
-- 无
+- `HPC/cp2k/2026.2/24.03-lts-sp4/Dockerfile`:
+  - 构建步骤由 Makefile 改为上游 2026.2 官方 CMake 构建脚本：`WORKDIR /opt/cp2k/tools/toolchain` + `./build_cp2k.sh --build-static -j $(nproc)`（该脚本要求 cwd 为 `tools/toolchain`，会自动读取 `toolchain.conf`/`toolchain_settings` 生成 CMake 选项）。
+  - 运行时依赖收集步骤改为对 `/opt/cp2k/install/bin/cp2k.psmp` 执行 `ldd`，并先 `source .../install/setup` 使 ldd 能解析工具链共享库；移除已不存在的 `unlink ./exe/local/cp2k.popt`、`unlink ./exe/local/cp2k_shell.psmp`。
+  - runtime 阶段由 `COPY /opt/cp2k/exe/local/` 改为 `COPY /opt/cp2k/install/`（CMake 的安装前缀布局）。
+  - 软链接目标与 entrypoint 的 `PATH` 由 `/opt/cp2k/exe/local` 更新为 `/opt/cp2k/install/bin`。
+  - `run_tests` 调用按 2026.2 的 `do_regtest.py <binary_dir> <version>` 新签名，把 `local` 改为 `/opt/cp2k/install/bin`。
+  - 在 `--install-all` 基础上补充 `--with-ace=no --with-gauxc=no`：`gauxc` 会强制启用预编译 `libtorch`（仅 x86_64），在 aarch64 上链接会失败；上游 2026.2 的 arm64 构建 profile（`toolchain_arm64`）正是关闭 ACE/LIBTORCH/GAUXC。原 Dockerfile 已有 `--with-libtorch=no`，本次补齐 `--with-gauxc=no` 后 libtorch 才会保持关闭。
 
 ## 修复逻辑
-CI Failure Analyst 的报告将失败类型判定为 `infra-error`，置信度为“低”，知识库模式 42（日志缺失无法定位），兼与模式 19（证据不足）一致：
-
-- 上下文 `ci.logs` 为空（值为 `"(not available — analyze based on PR diff only)"`），`ci.run_info` 为 `(not available)`，没有任何可用的失败日志。
-- 报告中也不存在 `Finished: SUCCESS` / `Build successful` 等成功标志，无法据此判断失败发生在未提供的下游 job。
-- 报告明确要求：“code-fixer 在获得有效 CI 日志前不应执行任何修改。”
-
-因此本次仅能确认“日志整体缺失”，无法建立 PR 改动与失败之间的因果关系，任何修改都属于盲目改动，违反最小化原则。故不修改 `pr.changed_files` 中的任何文件。
+已获取真实失败 job 日志并定位根因：
+- x86-64 构建日志：`#13 0.053 cp: cannot stat './tools/toolchain/install/arch/local.psmp': No such file or directory` + `#13 0.181 make: *** No targets specified and no makefile found. Stop.`（同样出现在 aarch64 日志）。
+- 通过上游 `cp2k/cp2k` `support/v2026.2`（对应 Dockerfile `ARG VERSION=2026.2`）验证：`tools/toolchain/generate_arch_files.sh` 在 2026.2 已被删除（2025.2 仍存在），toolchain 结束时提示改用 `./build_cp2k.sh`；新脚本基于 CMake，二进制安装到 `CMAKE_INSTALL_PREFIX=/opt/cp2k/install/bin`（`cp2k.psmp`、`cp2k.popt` 软链、`cpk_shell`/`graph`/`dumpdcd`/`xyz2dcd` 的 `.psmp` 均在 `install/bin`），并生成 `install/cp2k_env`。
+- 因此把构建方式切换到 `build_cp2k.sh --build-static`（静态 `libcp2k` 与旧 `make` 产物等价，外部依赖仍为共享库，`ldd` 收集逻辑继续适用），并同步更新所有产物路径。
+- 关于 `--with-gauxc=no`：上游 `install_libtorch.sh` 使用固定 sha256 的 `libtorch-cxx11-abi-shared-with-deps-2.7.1+cpu.zip`（x86_64），而 `--install-all` 会启用 gauxc 并强制 `with_libtorch=__INSTALL__`，使原 `--with-libtorch=no` 失效；2026.2 官方 `Dockerfile.test_arm64-psmp` 的 CMake 配置明确关闭 `CP2K_USE_ACE/LIBTORCH/GAUXC`。为避免 aarch64 链接 x86 libtorch 失败，补充关闭 gauxc/ace，`build_cp2k.sh` 会自动据此生成对应 `-DCP2K_USE_*=OFF`。
+- 注：本分支已存在的 `xz` 依赖修复（libint 在 2026.2 改为 `.tar.xz`，日志中 `Installing LIBINT ... Step libint took 217.00 seconds` 已成功）予以保留，本次未改动。
 
 ## 潜在风险
-无（未做任何代码修改）。
-
-## 待确认事项（供后续 CI 重跑/日志获取后处理，非本次修复）
-1. 必须获取失败 job 的实际日志，否则无法进行根因判定。
-2. 确认失败发生在 trigger/编排层还是下游架构构建 job（x86-64 / aarch64）。
-3. 确认上游 `cp2k/cp2k` 是否存在 `support/v2026.2` 分支（对应 Dockerfile 第 11 行 `git clone -b support/v2026.2`）。
-4. 确认 `HPC/cp2k/meta.yml` 的 `2026.2-oe2403sp4` 条目是否需要补充 `arch` 字段（当前条目未声明 `arch`；cp2k 本身支持 amd64/arm64，故本身未必是问题）。
-5. 若后续确认是构建阶段失败，再排查 `install_cp2k_toolchain.sh --install-all` 在 openEuler 24.03-LTS-SP4 下是否缺依赖。
+- 本次仅按上游 2026.2 官方 CMake 流程改写，未能在此环境实际执行完整 Docker 构建（CP2K 全量编译耗时长）；构建脚本 `build_cp2k.sh`、`do_regtest.py` 的接口均依据 `support/v2026.2` 源码逐一核对。
+- 关闭 `ACE`/`GAUXC`（及其依赖 libtorch）会移除对应可选功能，符合原 Dockerfile `--with-libtorch=no` 的意图与上游 arm64 profile 的做法，不影响基础 cp2k 计算功能。
