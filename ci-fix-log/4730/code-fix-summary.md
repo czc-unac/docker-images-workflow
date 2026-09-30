@@ -1,19 +1,17 @@
 # 修复摘要
 
 ## 修复的问题
-CI 失败分析报告将本次失败判定为 `infra-error`（证据不足），未提供任何实际构建/测试日志，无法定位根因，因此本次**不进行任何代码修改**。
+无需代码修复。CI 失败分析报告结论为 `infra-error`（证据不足，无法归类），且明确要求在补齐日志前不要提交任何修改。
 
 ## 修改的文件
-- 无（本次未修改 `pr.changed_files` 中的任何文件）
+- 无
 
 ## 修复逻辑
-- 分析报告明确给出的结论是：`ci.logs` 为 `(not available)`、`ci.run_info` 为 `(not available)`，**没有任何可用的日志**，失败位置与原因均无法确认；失败类型归为 `infra-error`（低置信度，模式42 日志缺失无法定位 / 模式19 证据不足）。
-- 分析报告在“修复验证要求”中明确要求：**code-fixer 在收到实际日志前不应提交任何修改**，不得假设疑点中的任何一条为真实根因。
-- 角色规范也明确要求：**若分析报告指出是 infra-error，应在摘要中说明无需代码修改，不要强行改代码**。据此本次不做任何猜测性修复。
-- 补充说明（供后续参考，不构成本次修改依据）：
-  - 当前 `fix/4730` 分支相对 PR 基线（`7811d7e87`）的差异包含一次**此前已提交**的自动修复（`be6143247`），该提交从 `AI/onnxruntime/1.30.0/24.03-lts-sp4/Dockerfile` 中移除了 `gcc-toolset-14-c++*`。该行为不依赖 openEuler 精确包名即可保证兼容性：同文件保留的 `gcc-toolset-14-gcc*` 通配已覆盖 `gcc-toolset-14-gcc-c++`（仓库内其他镜像如 `AI/vllm-cpu/*` 使用的即为 `gcc-toolset-12-gcc-c++`），因此移除不存在的 `gcc-toolset-14-c++*` 是安全的。本次不改动、不回滚该既有提交。
-  - 本次已通过 `https://api.github.com/repos/microsoft/onnxruntime/git/refs/tags/v1.30.0` 验证上游 tag `v1.30.0` 确实存在，故 `git clone -b v1.30.0` 的目标 tag 不是失败原因。
-  - 其余待确认点（SP4 源中 `gcc-toolset-14-*` 包可用性、aarch64 下 `ln -sf` 路径、编译依赖完整性、`meta.yml`/`image-info.yml` 一致性、文件末尾换行）均**需要实际 CI 日志**才能确认，不在本次猜测范围内。
+分析报告显示本次上下文中 `ci.run_info` 与 `ci.logs` 均为 `(not available)`，无法获取任何 CI 失败日志，失败类型判定为 `infra-error`，置信度低。报告在"修复方向"中明确指出：Code Fixer **不应**在仅凭 diff 的情况下修改 Dockerfile 或元数据文件，并说明"在日志补齐前，请勿提交任何修复"。
+
+按照任务约定，"如果分析报告指出是 `infra-error`（CI 基础设施问题），在 output_file 中说明无需代码修改，不要强行改代码"。因此本次不做任何代码改动。
+
+报告中仅列出的若干 **潜在风险点**（Dockerfile 及元数据文件末尾缺少换行、`pip install cmake==3.28` 使用非完整补丁号、`yum install python3-flatbuffers python3-protobuf` 可用性、标签链接使用 gitee.com 而非 atomgit.com 等）均为提示性质，报告已明确"禁止据此直接下根因结论"，故不据此修改。
 
 ## 潜在风险
-无（本次未改动任何代码）。既有分支改动均为此前提交，未受本次操作影响。建议下一步先获取失败架构构建 job（x86-64 / aarch64）的完整日志，再决定是否修复。
+无（未做任何代码改动）。建议后续补充失败 job 的完整日志后重新分析，重点确认失败阶段为元数据/YAML 预检阶段还是 Docker 构建阶段，再决定修复方向。
