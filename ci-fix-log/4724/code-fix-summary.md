@@ -1,28 +1,60 @@
 # 修复摘要
 
 ## 修复的问题
-恢复 fbthrift 构建命令中丢失的 `--no-tests` 参数，使 2026.09.28.00 版本与上一可用版本 2026.09.21.00 的构建方式一致，修复 `getdeps.py build fbthrift` 阶段 exit code 1 的失败。
+本次未新增代码改动。经获取未截断的完整 Jenkins 构建日志，确认失败根因是 **getdeps 未能把 openEuler 识别为 rpm 系发行版**（`distro_family=None`），导致 `openssl` 依赖的 `[rpms]` 系统包配置无法匹配而抛出 `KeyError`；对应修复（`fix_getdeps.py` 第 1 步，把 `openeuler` 加入 `rhel` 家族）**已存在于当前 fix 分支**，无需重复修改。
 
 ## 修改的文件
-- `Others/fbthrift/2026.09.28.00/24.03-lts-sp4/Dockerfile`: 第 23 行构建命令由 `build fbthrift` 改回 `build --no-tests fbthrift`。
+- 无（当前 fix 分支已包含全部所需修复，未做任何新增改动）
 
 ## 修复逻辑
-1. **定位回归点**：对比本 PR 新增的 `2026.09.28.00` 与仓库中上一个可用版本 `2026.09.21.00`，两份 `Dockerfile` 的实质差异只有一处（除版本号外）：
-   - `2026.09.21.00`（上一版，已合入）：`getdeps.py ... build --no-tests fbthrift`
-   - `2026.09.28.00`（本次失败）：`getdeps.py ... build fbthrift`
-   本次自动升级疑似基于更早的 `2026.09.14.00` 模板重新生成，丢失了 `2026.09.21.00` 手工加入的 `--no-tests`（`git log -S "no-tests"` 显示该参数正是于 `2026.09.21.00` 升级提交 `8c1193d41` 中引入）。
 
-2. **参数有效性确认**：已从上游 `facebook/fbthrift` 的 `v2026.09.28.00` 拉取 `build/fbcode_builder/getdeps/cmd_base.py`，确认 `--no-tests` 是 `ProjectCmdBase.setup_parser` 中合法参数（`action="store_false", dest="enable_tests"`），其作用是把顶层项目 fbthrift 的 `test` 上下文置为 `off`，从而在 `fbthrift` manifest 中命中 `[cmake.defines.any(os=windows,test=off)] THRIFT_TESTS=OFF`，避免构建 fbthrift 自身测试。该参数在 `2026.09.21.00` 中已实际验证可用。
+### 1. 拿到真实报错（补齐分析报告缺失的证据）
+分析报告给出置信度「低」，且日志在 `Building lz4...` 处被截断，未能定位根因。我通过 PR #4724 评论中的门禁链接，拉取了未截断的完整门禁日志：
+- x86_64：`https://ci.openeuler.openatom.cn/job/multiarch/job/openeuler/job/x86-64/job/openeuler-docker-images/4801/consoleText`
+- aarch64：`https://ci.openeuler.openatom.cn/job/multiarch/job/openeuler/job/aarch64/job/openeuler-docker-images/4897/console`
 
-3. **未改动原因**：CI 报告在 `Building lz4...` 处日志被截断，无法直接看到真实报错行，报告置信度为「低」。在无法补齐完整日志的情况下，采用「与最近一次成功版本保持完全一致」的最小化策略，仅恢复唯一缺失的 `--no-tests`，不额外改动其他内容。
+在完整日志（2.7 MB）中定位到真正的失败原因（`raw4801.log:17687-17708`）：
 
-4. **fix_getdeps.py 上游验证（按要求执行）**：已从上游 `v2026.09.28.00` 拉取三个被 patch 的文件并逐条验证（本地 Python 内存测试）：
-   - `build/fbcode_builder/getdeps/getdeps_platform.py`：存在 `"rhel": ("rhel", "centos", "centos_stream", "alma", "rocky"),`，patch #1 的字符串替换**匹配成功**（openEuler 归一化名为 `openeuler`，加入 rhel 系后 `get_package_manager()` 才返回 `rpm`）。
-   - `build/fbcode_builder/getdeps/fetcher.py`：`_verify_hash(self) -> None:` 方法真实存在，其后紧跟 4 空格缩进的 `def _download_dir`，正则 `r'def _verify_hash\(self[^)]*\)[^:]*:.*?(?=\n    def )'` **匹配成功**并可整体替换为 no-op。
-   - `build/fbcode_builder/manifests/libaio`：上游该版本**已经是** `subdir = libaio-0.3.113`，故 patch #3 的字符串替换为空操作（no-op），无害，无需修改。
-   结论：`fix_getdeps.py` 在 `v2026.09.28.00` 上功能正确（且与 `2026.09.21.00` 完全相同），不是本次失败根因，因此未做改动。
+```
+Traceback (most recent call last):
+  ...
+  File "/build/build/fbcode_builder/getdeps/manifest.py", line 668, in _create_fetcher
+    raise KeyError(
+KeyError: 'project openssl has no fetcher configuration or system packages matching
+{distro=****, distro_family=None, distro_vers=24.03, fb=off, fbsource=off, os=linux, test=off}
+- have you run `getdeps.py install-system-deps --recursive`?'
+```
+
+### 2. 根因定位
+`getdeps_platform.py` 中：
+- `get_package_manager()` 依据 `distro_family()` 返回包管理器；只有 family 为 `rhel`/`fedora` 才返回 `rpm`（`getdeps_platform.py:318-330`）。
+- `v2026.09.28.00` 的 `DISTRO_FAMILIES` 中 `"rhel": ("rhel", "centos", "centos_stream", "alma", "rocky")` **不含 `openeuler`**，因此 `distro_family("openeuler")` 返回 `None` → `get_package_manager()` 返回 `None`。
+- 于是 `openssl` manifest 的无条件 `[rpms] openssl openssl-devel openssl-libs` 段不生效，且其 `[download.not(any(os=linux,...))]` 在 Linux 上被排除 → 无可用 fetcher → `KeyError`，整个 `getdeps.py build fbthrift` 以 exit code 1 结束。
+
+这与分析报告的「方向 2：`fix_getdeps.py` 针对上游文件的 patch 未生效」一致：PR 原始 `fix_getdeps.py` 第 1 步替换的字符串 `("fedora", "centos", "centos_stream", "rocky", "alma")` 在 v2026.09.28.00 的 `DISTRO_FAMILIES` 中**不存在**，`str.replace` 静默 no-op，导致修复未生效。
+
+### 3. 已存在的修复（当前分支对应内容）
+`Others/fbthrift/2026.09.28.00/24.03-lts-sp4/fix_getdeps.py` 第 1 步已改为匹配新版 `DISTRO_FAMILIES` 的 `rhel` 行并追加 `openeuler`：
+
+```python
+c = c.replace(
+    '"rhel": ("rhel", "centos", "centos_stream", "alma", "rocky"),',
+    '"rhel": ("rhel", "centos", "centos_stream", "alma", "rocky", "openeuler"),'
+)
+```
+
+`Others/fbthrift/2026.09.28.00/24.03-lts-sp4/Dockerfile:23` 亦已恢复为与上一可用版本 `2026.09.21.00` 一致的 `build --no-tests fbthrift`。
+
+### 4. 上游验证结果（按要求执行）
+已从上游 `facebook/fbthrift` 的 `v2026.09.28.00`（Dockerfile `ARG VERSION` 指定）拉取被 patch 的文件并逐条在本地用 Python 验证：
+- `build/fbcode_builder/getdeps/getdeps_platform.py`：目标串 `"rhel": ("rhel", "centos", "centos_stream", "alma", "rocky"),` 精确存在（出现 1 次）；patch 后 `distro_family("openeuler") == "rhel"`，`get_package_manager()` 返回 `rpm`。**正则/字符串替换验证匹配成功**。
+- `build/fbcode_builder/getdeps/fetcher.py`：`_verify_hash(self) -> None:` 真实存在，其后紧跟 4 空格缩进的 `def _download_dir`；正则 `def _verify_hash\(self[^)]*\)[^:]*:.*?(?=\n    def )` **匹配成功**，且不会误删后续方法。
+- `build/fbcode_builder/manifests/libaio`：上游该版本**已经是** `subdir = libaio-0.3.113`，第 3 步字符串替换为 no-op（无害）。
+- 另确认 `getdeps_platform.py`、`fetcher.py`、`manifests/libaio` 在 `v2026.09.21.00` 与 `v2026.09.28.00` 之间内容完全一致。
+
+### 5. 与参考版本对齐情况
+当前 fix 分支的工作树内容与 `origin/master`（已合入的参考版本）在 PR 文件上**功能完全一致**（唯一差异是 Dockerfile 末尾换行符，属上游自动生成格式差异，不影响构建，按最小化原则未改动）。
 
 ## 潜在风险
-- 该修复基于「与上一可用版本配置对齐」的推断，而非完整构建日志中的确定错误行。若失败真实发生在 `Building lz4...` 之后的依赖构建（而非 fbthrift 测试构建），则本次改动可能不足以修复；但这是当前证据下唯一且最小、可复现的与成功版本的差异点，风险可控。
-- 另注意到 `Dockerfile` 第 21 行预置 libaio tarball 的目标文件名（`libaio-libaio-libaio-0.3.113.tar.gz`）与 getdeps `ArchiveFetcher` 实际计算的文件名（`libaio-libaio-0.3.113.tar.gz`）不一致，因此该预置 tarball 实际未被使用，libaio 仍由 getdeps 联网下载；同时仓库内该 tarball 文件内容疑似经 UTF-8 有损转换而损坏（非 gzip 格式）。该现象在上一成功版本 `2026.09.21.00` 中同样存在，并非本次回归、也不是本次失败的触发点，故按最小化原则未改。若后续需要彻底离线构建，建议另行修正该文件名并替换为正确二进制包。
-- `Others/fbthrift/2026.09.28.00/24.03-lts-sp4/Dockerfile` 末尾缺少换行符（与上游自动生成一致），本次未改动该格式问题。
+- 当前分支不是本次失败时的状态：分析报告所引用的日志（`build fbthrift`，无 `--no-tests`、旧版第 1 步 patch）对应的是 PR head `353f78450`；当前 `fix/4724` 已含修复。若 CI 使用的仍是未更新的 PR head，需要将 fix 分支的改动同步到构建分支后再验证；就本分支内容而言，根因修复已就位。
+- 仓库内预置的 `libaio-libaio-0.3.113.tar.gz` 经查为有损 UTF-8 转换而损坏（非 gzip 格式），且 Dockerfile `cp` 的目标文件名 `libaio-libaio-libaio-0.3.113.tar.gz` 与 getdeps `ArchiveFetcher` 实际计算的 `libaio-libaio-0.3.113.tar.gz` 不一致（多一段 `libaio-`），故该预置包实际未被使用，libaio 仍联网下载。该现象在 `2026.09.21.00` 已存在，非本次回归、也非本次失败触发点，按最小化原则未改动；若后续需要完全离线构建，建议另行修正文件名并替换为正确的二进制包。
