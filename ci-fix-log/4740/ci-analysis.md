@@ -2,59 +2,52 @@
 
 ## 基本信息
 - PR: #4740 — ceph容器镜像升级至21.3.0版本.
-- 失败类型: `infra-error`（证据不足，无法定位真实失败）
+- 失败类型: infra-error（日志缺失，证据不足，无法归类到具体代码失败类型）
 - 置信度: 低
-- 知识库匹配: 模式19（证据不足 / 无法定位根因），亦与模式42（日志缺失无法定位）同类
-- 新模式标题: （不适用）
-- 新模式症状关键词: （不适用）
+- 知识库匹配: 模式19（证据不足 / 无法定位根因）
+- 新模式标题: 不适用
+- 新模式症状关键词: 不适用
 
 ## 根因分析
 
 ### 直接错误
-本次上下文的 `ci.logs` 字段为：
-
 ```
-(not available — analyze based on PR diff only)
+(ci.logs 未提供 — context 中 ci.run_info 与 ci.logs 均为 "(not available)"，
+ 无任何可引用的报错信息)
 ```
-
-`ci.run_info` 同样为 `(not available)`。**没有任何可供分析的 CI 日志或运行信息**，因此不存在可引用的报错堆栈、编译输出或测试输出。
 
 ### 根因定位
-- 失败位置: 未知（日志缺失，无法判定架构/构建阶段）
-- 失败原因: 无法确认。仅凭 PR diff 无法判断失败是发生在 Docker 构建的哪个阶段（dnf 安装、libnbd 编译、ceph cmake 配置、ninja 编译、还是运行阶段的容器启动检查）。
+- 失败位置: 未知（无日志）
+- 失败原因: 无法确定。上下文未提供 `ci.logs` 与 `ci.run_info`，无法定位失败 job、失败步骤及具体报错行。
 
 ### 与 PR 变更的关联
-无法判定。PR 新增了以下内容，但由于缺少日志，**不能**将任何一项认定为失败根因：
-
-1. `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile`（新增，55 行）
-   - `git clone -b v${VERSION} --recursive --depth 1 https://github.com/ceph/ceph.git`，其中 `VERSION=21.3.0`。若上游 `ceph/ceph` 仓库不存在 `v21.3.0` 标签，克隆会报 `Remote branch v21.3.0 not found`（参见模式02、模式22），但目前无日志佐证。
-   - `ninja -j2` 并行度较低，且 ceph 为大型 C++ 工程，存在编译超时或内存耗尽（OOM）的可能，同样无日志佐证。
-   - `ENV LD_LIBRARY_PATH=/usr/local/lib64:$LD_LIBRARY_PATH` 自引用未定义变量，可能触发 BuildKit `UndefinedVar` 警告（模式20）。该警告通常为非致命，**不应**在无日志的情况下被当作根因。
-   - `dnf install` 依赖清单较长，`nasm`、`librdkafka`、`grpc-plugins` 等包在 24.03-lts-sp4 仓库中是否全部可用未经验证。
-2. `Storage/ceph/21.3.0/24.03-lts-sp4/entrypoint.sh`（新增，72 行，文件末尾无换行）——运行阶段脚本。
-3. `Storage/ceph/README.md`、`Storage/ceph/doc/image-info.yml`、`Storage/ceph/meta.yml`——文档/元数据更新（`meta.yml` 新增条目末尾无换行）。
-
-> 说明：按诊断约束，在日志缺失时不得把上述 diff 中的任何可疑点直接作为失败根因，它们仅作为待验证的排查方向。
+无法判断。没有失败日志，无法确认失败是否由本 PR 的改动触发，也无法排除下游架构构建 job（x86-64 / aarch64）失败或基础设施问题。
 
 ## 修复方向
 
-**本次不提供确定性修复方向**，因为缺少 CI 日志，任何修复都属于猜测。为避免 Code Fixer 误改，建议先按"需要进一步确认的点"补齐日志后再定位。
+> 以下方向仅为**基于 diff 的待验证猜测**，不构成根因结论。在拿到真实日志前 **Code Fixer 不应直接据此修改**。
 
 ### 方向 1（置信度: 低）
-若后续确认失败发生在 `git clone`/`git checkout` 阶段，优先核实 ceph 21.3.0 对应上游 tag 的真实命名与存在性（`v21.3.0` vs `21.3.0` vs 其他），再决定修复方式。
+检查新增文件是否缺少 Copyright / SPDX-License-Identifier 头（参考模式17）。本 PR 新增了 `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile` 与 `Storage/ceph/21.3.0/24.03-lts-sp4/entrypoint.sh` 两个全新文件，若 CI 的 `check_package_license` 规范检查要求所有新增文件带版权头，则会失败。此为规范类检查，与构建本身无关。
 
 ### 方向 2（置信度: 低）
-若后续确认失败发生在编译/链接或超时阶段，需结合具体报错判断是补充构建依赖、调整并行度，还是属于架构相关问题。
+检查元数据一致性（参考模式11）。本 PR 同步修改了 `Storage/ceph/README.md`、`Storage/ceph/doc/image-info.yml`、`Storage/ceph/meta.yml`，新增 tag `21.3.0-oe2403sp4`。若 CI 预检要求 README / image-info.yml / meta.yml / image-list.yml 之间的条目严格一致（例如 `Storage/ceph/image-list.yml` 未同步更新），可能出现一致性校验失败。
+
+### 方向 3（置信度: 低）
+Dockerfile 构建阶段本身可能失败（例如 `dnf install` 中某个包在 openEuler 24.03-LTS-SP4 源中不存在、`do_cmake.sh` 配置报错、`git clone -b v21.3.0` tag 不存在、或 `ninja -j2` 编译错误）。但这些均需日志证实，当前无任何证据。
 
 ## 需要进一步确认的点
-1. **获取失败 job 的完整日志**：当前仅拿到 trigger/编排层信息，`ci.logs` 为空。需要提供真正失败的下游构建 job 日志（如 `/job/x86-64/…` 与 `/job/aarch64/…`），或运行阶段 `[Check]` 的容器启动检查日志。
-2. **确认失败的架构**：本 PR 声明支持 `amd64, arm64`，但 `meta.yml` 新增条目未设置 `arch` 约束。需确认失败发生在哪个架构 runner，判断是否为架构相关问题。
-3. **确认失败阶段**：是 Dockerfile 构建失败，还是 `entrypoint.sh` 容器启动自检失败（参见模式25 容器启动后立即退出）。`entrypoint.sh` 末尾缺少换行、且以交互式 `ceph-mon ... &` 后台启动后 `sleep 3` 判断进程，运行阶段存在不确定性。
-4. **核实上游 tag**：确认 `https://github.com/ceph/ceph` 是否存在 `v21.3.0` 标签。
-5. **核实依赖可用性**：确认 24.03-lts-sp4 仓库中 Dockerfile 所列全部 `dnf install` 包名均存在。
+1. **必须获取失败 job 的完整日志**。当前 `ci.logs` 为空，无法进行任何有效诊断。需要 CI 提供实际失败 job 的日志（尤其是若 trigger/编排层 job 成功而 PR 仍失败，则需获取下游架构构建 job 日志，如 `/job/x86-64/…` 或 `/job/aarch64/…`）。
+2. 获取 `ci.run_info`，确认失败的 workflow、job 名称与阶段（build / check / push）。
+3. 确认本 PR 是否添加了 `ci_failed` 标签，以及标签对应的 job 是哪一个。
+4. 若拿到日志，需确认失败发生在 Docker build 阶段还是 CI 规范检查（license / 元数据一致性）阶段。
+5. 核对 `Storage/ceph/image-list.yml` 是否实际存在且需要随新版本更新（本项目规范要求每个场景目录包含 `image-list.yml`）。
 
 ## 修复验证要求
-不适用（本次未提出涉及正则 patch 外部源文件的修复方向）。若后续在证据补齐后确定为上游 tag/URL 相关修复，Code Fixer 必须先访问上游仓库确认目标 tag/路径真实存在，再行提交。
+本报告置信度为**低**，**证据不足**，Code Fixer **不得**直接依据上述方向修改代码。必须等待真实失败日志后再定位。若最终确定为：
 
-## 结论
-由于 `ci.logs` 与 `ci.run_info` 均不可用，**证据不足，无法确定根因**。本报告不应被视为对真实失败原因的判定；请补充下游构建 Job 日志后重新诊断。
+- **license 头缺失（模式17）**：需按下述格式验证新增文件头部是否已含版权声明后再提交：
+  - Dockerfile：`# Copyright (c) Huawei Technologies Co., Ltd. …` + `# SPDX-License-Identifier: MulanPSL-2.0`
+  - Shell 脚本：同样需包含对应格式的 `#` 注释版权头。
+- **元数据一致性（模式11）**：需先确认 CI schema/一致性检查的具体要求（README、image-info.yml、meta.yml、image-list.yml 的字段与层级规范），逐项比对后再修改。
+- **Docker 构建失败**：需先从日志取得真实报错，再对照上游 `ceph v21.3.0`（以 Dockerfile `ARG VERSION=21.3.0` 为准）的构建要求验证修复，不得凭猜测修改依赖或命令。
