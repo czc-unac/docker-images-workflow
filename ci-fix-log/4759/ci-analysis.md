@@ -2,55 +2,58 @@
 
 ## 基本信息
 - PR: #4759 — 【自动升级】milvus容器镜像升级至3.0.2版本.
-- 失败类型: infra-error（证据不足，无法确定真实类型）
+- 失败类型: infra-error（证据不足，实际失败类型无法判定）
 - 置信度: 低
-- 知识库匹配: 模式19（证据不足 / 无法定位根因）
+- 知识库匹配: 模式42（日志缺失无法定位）
 - 新模式标题: (不适用)
 - 新模式症状关键词: (不适用)
 
-## 前置检查（日志与状态一致性）
-- 上下文中 `ci.run_info` = `(not available)`，`ci.logs` = `(not available — analyze based on PR diff only)`。
-- 本次**未提供任何构建日志**，既无成功标志（无 `Finished: SUCCESS` / `Build successful`），也无任何失败堆栈。因此无法据此定位失败 job、失败步骤和第一条 error。
-- 按核心约束，本次判定为**证据不足**，不得将 diff 层面的任何推测性风险点当作确定根因。
+## 前置检查：日志与状态一致性
+上下文 `ci.logs` 为 `(not available — analyze based on PR diff only)`，`ci.run_info` 为 `(not available)`。
+本次**未提供任何 CI 日志**，既无法确认失败发生的 job，也无法确认失败标志（无可检查的 `Finished: SUCCESS` / `Build successful` 末尾标志）。
+因此无法执行"日志扫描 / 根因定位 / 与 PR 变更关联"等基于证据的步骤，按核心约束判定为**证据不足**。
 
 ## 根因分析
 
 ### 直接错误
-无可用日志，无法摘录任何错误信息。
+（无。`ci.logs` 未提供，无任何可引用的错误信息。）
 
 ### 根因定位
-- 失败位置: 未知（日志缺失，无法定位到文件/行号/函数）
-- 失败原因: 未知。无法区分是代码/构建错误，还是基础设施问题。
+- 失败位置: 未知（日志缺失）
+- 失败原因: 无法确认，缺少 CI 日志，无法定位具体错误
 
 ### 与 PR 变更的关联
-无法确认。PR 主要包含：
-- 新增 `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile`（new file，53 行）
-- 更新 `Database/milvus/README.md`、`Database/milvus/doc/image-info.yml`（新增 `3.0.2-oe2403sp4` 行）
-- 更新 `Database/milvus/meta.yml`（新增 `3.0.2-oe2403sp4: path: 3.0.2/24.03-lts-sp4/Dockerfile`）
-
-仅从 diff 可识别以下**待验证**风险点（均为推测，非结论）：
-1. **新增 Dockerfile 缺少 Copyright / SPDX 版权头**：新增的 `Dockerfile` 未见版权声明，README/image-info 新增行为也未见 HTML 注释版权头。若 CI 执行 `check_package_license`，会命中（对照知识库模式17）。
-2. **Dockerfile 末尾疑似多余行尾反斜杠**：最后一行 `ENV PATH=$PATH:/milvus/bin/` 后疑似带一个 `\` 且文件无结尾换行，可能触发 Dockerfile 解析/续行错误。
-3. **构建期命令可用性未知**：`FROM ${BASE} AS builder` 的第一个 `yum install` 列表中未显式安装 `curl`，但后续 rustup/etcd/minio 步骤依赖 `curl`；是否由基础镜像自带无法从 diff 确认。
-4. **上游制品可用性未知**：`git clone -b v${VERSION}`（v3.0.2）、`go1.24.2`、`conan==1.61.0`、`etcd v3.5.0`、minio 等在对应架构（amd64/arm64）是否可下载，无法从 diff 确认。
-
-以上任一点都可能造成构建失败，但在缺少日志的情况下无法确定。
+无法判定。PR 为自动升级，新增 `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile`，并同步更新
+`Database/milvus/README.md`、`Database/milvus/doc/image-info.yml`、`Database/milvus/meta.yml`。
+在缺少日志的情况下，不能断言失败由本次改动触发，也不能排除原本存在的流水线/基础设施问题。
 
 ## 修复方向
 
 ### 方向 1（置信度: 低）
-不进行任何修复，先补齐证据。当前属于 infra-error / 证据不足，Code Fixer 不应据此改动代码。需获取真正失败的下游构建 job 日志后再判断。
+**先补齐日志再诊断。** 当前证据不足以支撑任何修复动作，Code Fixer 不应基于本报告直接改动代码。
+需先获取真正失败 job 的日志（构建 job，且需区分 amd64 / arm64 架构），再据实定位。
 
-### 方向 2（可选，置信度: 低）
-若补齐日志后确认是版权头缺失（模式17），则按该模式为新文件补全对应格式版权头；该方向仅为候选，未经验证，不得直接套用。
+### 方向 2（推测性候选，仅为缩小排查范围，不构成结论）
+以下为结合 diff 与历史模式的**待验证候选**，均无日志证据，禁止直接据此修改：
+1. **新增文件缺少 Copyright / SPDX 版权头**（参考模式17）。新增的 `3.0.2/24.03-lts-sp4/Dockerfile` 中未见
+   `# Copyright ...` / `# SPDX-License-Identifier: MulanPSL-2.0` 头，若 CI `check_package_license` 生效可能判定为 lint-error。
+2. **文件末尾无换行**（diff 显示 `\ No newline at end of file`）。新增 Dockerfile 与 `meta.yml` 末尾均无换行，
+   若 CI 存在格式/预检规则可能触发。
+3. **构建期依赖/源码下载或编译失败**（参考模式10、模式12、模式44 等）。Dockerfile 串联了
+   `scripts/install_deps.sh`、`make build-cpp`、`make build-go`、Rust 1.73、conan 1.61.0、etcd/minio 下载等大量外部依赖，
+   任一环节失败都会表现为 build-error，但无法在无日志时确认。
 
 ## 需要进一步确认的点
-1. **获取失败 job 的实际日志**：本仓库 CI 会按架构拆分下游构建 job，需分别获取 `/job/x86-64/…` 与 `/job/aarch64/…`（或对应编排名称）的完整构建日志，确认失败发生在哪个架构、哪一步骤。
-2. 确认失败是否发生在 trigger/编排层之外的构建 job，以及是否有 `check_package_license` / Dockerfile lint 等预检步骤日志。
-3. 核对新增 `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile` 是否满足仓库对新增文件的版权头要求（模式17）。
-4. 确认该 Dockerfile 末尾是否真的存在多余 `\` 及缺失结尾换行，导致 `docker build` 解析失败。
-5. 确认 `milvus-io/milvus` 上游是否存在 `v3.0.2` tag，以及 go/conan/etcd/minio 等下载源在 amd64、arm64 上均可用。
-6. 在拿到日志前，不得将本次失败归因为任何 diff 层面的推测项。
+1. **获取真正失败的构建 job 日志**（关键，优先级最高）。trigger/编排层日志不能定位问题，需要
+   `x86-64` / `aarch64`（或 amd64/arm64）架构专属构建 job 的完整日志。
+2. 确认 PR 上 `ci_failed` 标签对应的具体失败 job 名称与阶段（预检 / 构建 / 检查 / 推送）。
+3. 若失败发生在预检阶段：核对 CI 是否要求新增 Dockerfile/元数据带 Copyright + SPDX 头，以及文件末尾换行规范。
+4. 若失败发生在构建阶段：确认失败发生在 `install_deps.sh`、`make build-cpp`、`make build-go` 还是运行时
+   `etcd`/`minio` 下载步骤，以及失败架构。
+5. 核对 `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile` 中 `COPY --from=builder /milvus/...` 的产物路径
+   与上游 `v3.0.2` 实际构建输出目录是否一致（上游目录结构可能变化，参考模式12）。
 
-## 修复验证要求（仅当修复涉及正则 patch 外部源文件时填写）
-本次不涉及对第三方/上游源文件的正则 patch。若后续定位为 getdeps/fetcher.py 类正则问题，Code Fixer 必须从上游仓库（以 Dockerfile `ARG VERSION` 为准）拉取对应版本的实际源文件，验证正则确实匹配后再提交。
+## 修复验证要求
+本报告置信度为**低**，根因未确定，**不满足直接修复的条件**。Code Fixer 在获得失败 job 日志前**不得**提交猜测性修改。
+若后续依据日志确认修复方向涉及"修改正则 patch 外部源文件"（如 getdeps fetcher.py），
+则必须从上游仓库（以 Dockerfile 中 `ARG VERSION` 为准）拉取对应文件验证正则匹配后再提交。
