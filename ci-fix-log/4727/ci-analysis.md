@@ -2,52 +2,68 @@
 
 ## 基本信息
 - PR: #4727 — 【自动升级】cp2k容器镜像升级至2026.2版本.
-- 失败类型: `infra-error`（证据不足）
+- 失败类型: infra-error（证据不足）
 - 置信度: 低
-- 知识库匹配: 模式42（日志缺失无法定位），兼与模式19（证据不足）情形一致
-- 新模式标题: (不适用)
+- 知识库匹配: 模式42（日志缺失无法定位）
+- 新模式标题: (不适用，命中模式42)
 - 新模式症状关键词: (不适用)
 
 ## 根因分析
 
 ### 直接错误
-```
-(无)
-```
-上下文 `ci.logs` 为空，值为 `"(not available — analyze based on PR diff only)"`；
-`ci.run_info` 同样为 `(not available)`。因此没有任何可用的失败日志。
-同时日志中也不存在 `Finished: SUCCESS` / `Build successful` 之类的成功标志，说明无法借此判定失败发生在下游未提供的 job（该分支不成立），本次仅能确认“日志整体缺失”。
+上下文中 `ci.logs` 为 `(not available — analyze based on PR diff only)`，`ci.run_info` 为 `(not available)`。
+本次分析**没有任何 CI 日志可供引用**，因此无法提取最早出现的错误信息。
+根据核心约束，日志缺失即判定为证据不足，不对具体错误作根因认定。
 
 ### 根因定位
 - 失败位置: 未知（无日志）
-- 失败原因: 无法确定。CI 日志未随上下文提供，无法定位具体失败步骤、文件与行号。
+- 失败原因: 无法确认。日志缺失，仅有 PR diff（新增 cp2k 2026.2 Dockerfile 及 README/image-info.yml/meta.yml 元数据更新）。
 
 ### 与 PR 变更的关联
-PR #4727 为自动升级类改动，新增 `HPC/cp2k/2026.2/24.03-lts-sp4/Dockerfile`（88 行全新文件），并同步更新：
-- `HPC/cp2k/README.md`（新增 2026.2-oe2403sp4 行）
-- `HPC/cp2k/doc/image-info.yml`（新增 tag 行）
-- `HPC/cp2k/meta.yml`（新增 `2026.2-oe2403sp4` 条目）
+无法从日志层面确认。仅能从 diff 观察到以下**潜在**风险点（均未经日志验证，不作为根因结论）：
 
-其中 `meta.yml` 的 `2026.2-oe2403sp4` 条目**未声明 `arch` 字段**（相比模式30/31，oneAPI 类镜像因缺少 `arch: x86_64` 会导致 aarch64 调度失败）。cp2k 本身支持 amd64/arm64（README 与 image-info.yml 均标注 amd64, arm64），故此项本身未必是问题，但在缺少日志时**不能据此下结论**。
-Dockerfile 中使用 `git clone -b support/v${VERSION}`（VERSION=2026.2 → `support/v2026.2`），若该上游分支不存在会失败，但同样**无日志佐证**。因此本次改动与失败之间的因果关系无法确认。
+1. **新增文件缺少版权/SPDX 头**（对照知识库模式17）
+   `HPC/cp2k/2026.2/24.03-lts-sp4/Dockerfile` 为全新文件，首行直接是 `ARG BASE=...`，未见
+   `# Copyright (...) Huawei Technologies ...` 与 `# SPDX-License-Identifier: MulanPSL-2.0` 头。
+   仓库中同类 Dockerfile（如 2025.2/24.03-lts-sp4）是否带头、CI `check_package_license` 是否强制要求，
+   需要核对。
+
+2. **git 分支名是否存在**
+   `git clone -b support/v${VERSION} --recursive https://github.com/cp2k/cp2k.git`，其中 `VERSION=2026.2`，
+   实际克隆分支为 `support/v2026.2`。该分支是否已在上游 `cp2k/cp2k` 创建（2026.2 是否为已发布 tag/分支）
+   无法从 diff 确认。若分支不存在将报 `Remote branch support/v2026.2 not found in upstream origin`。
+   但需注意：PR 标题为“自动升级”，通常上游已发布，可能性较低。
+
+3. **toolchain 构建脚本行为**
+   `./install_cp2k_toolchain.sh` 参数较多，`--with-openmpi=install` 等组合在 openEuler 24.03-LTS-SP4 上
+   是否可成功编译，需实际日志确认。
+
+4. **运行时依赖收集逻辑脆弱**
+   `ldd ./exe/local/cp2k.psmp | grep ... | awk '{print $3}' | cut -d/ -f7` 依赖固定路径层级 `-f7`，
+   若 toolchain 安装目录结构变化，会收集到错误 libdir，但这是运行时/构建成功后的潜在问题，与本次 CI 失败未必相关。
 
 ## 修复方向
 
 ### 方向 1（置信度: 低）
-本报告判定为“证据不足”，不提供明确修复方向。需先获取 CI 失败 job 日志，再依据实际报错定位。
+**重新触发 / 获取真实失败 job 日志**。当前唯一确定的事实是日志缺失，无法定位根因。
+在拿到真实失败 job（如 x86-64 / aarch64 构建 job 或 license 预检 job）日志前，不应做任何代码修改。
 
-### 方向 2（可选）
-若后续确认是构建阶段失败，可重点排查（仅为待验证假设，非结论）：
-- 上游分支 `support/v2026.2` 是否实际存在；
-- cp2k 工具链 `install_cp2k_toolchain.sh --install-all` 在 openEuler 24.03-LTS-SP4 下是否缺依赖；
-- `meta.yml` 新增条目是否需要 `arch` 约束。
+### 方向 2（可选，置信度: 低）
+若后续确认失败为 license/SPDX 预检未过，则参照模式17为新文件补齐版权头。
+**仅在日志证据支持时方可执行，当前不可据此修改。**
 
 ## 需要进一步确认的点
-1. **必须获取失败 job 的实际日志**（当前 `ci.logs` 完全缺失），否则无法进行任何根因判定。
-2. 确认失败发生在 trigger/编排层还是下游架构构建 job（x86-64 / aarch64）；若是编排层把任务分发后失败，需取下游 job 日志。
-3. 确认上游仓库 `cp2k/cp2k` 是否存在 `support/v2026.2` 分支（对应 Dockerfile 的 `git clone -b`）。
-4. 确认 `HPC/cp2k/meta.yml` 的 `2026.2-oe2403sp4` 条目是否需要 `arch` 字段及 CI 的架构调度策略。
+1. 获取失败 job 的完整日志（`ci.logs` 为空是本次分析的根本障碍）。
+2. 确认 CI 是否运行了 `check_package_license` 一类的 SPDX/版权检查，以及新增 Dockerfile 是否必须带头
+   （对照同目录 2025.2/24.03-lts-sp4/Dockerfile 现状）。
+3. 确认上游 `cp2k/cp2k` 是否存在 `support/v2026.2` 分支/tag。
+4. 确认 `meta.yml`、`image-info.yml`、`image-list.yml` 的一致性校验是否通过
+   （新增 `2026.2-oe2403sp4` 条目是否已同步到 `HPC/image-list.yml` 等文件）。
+5. 确认 `24.03-lts-sp4` 基础镜像是否同时支持 amd64/arm64 构建该 toolchain。
 
 ## 修复验证要求
-本报告置信度为“低”，且失败类型为 `infra-error`（证据不足），**code-fixer 在获得有效 CI 日志前不应执行任何修改**。
-现有日志不足以支撑任何正则 patch 或外部源文件修改，故无上游文件验证要求；若后续修复方向涉及修改上游源文件/正则，code-fixer 必须先按 Dockerfile `ARG VERSION`（2026.2）拉取对应上游文件验证匹配后再提交。
+当前置信度为“低”，且日志完全缺失，**禁止 code-fixer 在未取得下游构建 job 日志前提交任何修改**。
+建议的验证前置条件：
+- code-fixer 必须先获取本 PR 真实失败 job 的日志，确认失败阶段（预检 / 构建 / 测试）与具体报错行；
+- 若最终确认为版权头缺失，需对照 `HPC/cp2k/2025.2/24.03-lts-sp4/Dockerfile` 的实际头部格式，
+  验证新文件的 SPDX 声明与仓库规范一致后再提交。
