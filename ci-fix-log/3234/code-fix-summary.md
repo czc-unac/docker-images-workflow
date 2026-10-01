@@ -1,35 +1,27 @@
 # 修复摘要
 
 ## 修复的问题
-未做代码修复：本次 CI 失败是 eulerpublisher appstore 路径预检对**仓库根目录 `README.md`** 的误报（工具侧缺陷），非 PR 内容问题；在允许修改的文件范围内不存在能使该检查通过的合法改动。
+无需代码修改：该失败并非由 PR 变更内容引起，而是 CI 校验器（EulerPublisher `update/container/app/format.py`）对“根目录单段路径文件”的路径归一化缺陷导致，属工具/基础设施侧问题。
 
 ## 修改的文件
-- 无（未修改任何文件；`README.md` 保持 PR 原样）
+（无）
 
 ## 修复逻辑
 
-### 1. 已核对 CI 校验逻辑（按分析报告第 4 点要求）
-从上游 `openeuler-mirror/eulerpublisher`（master）拉取并核对了实际校验代码：
-- `update/container/app/update.py` → `ContainerVerification.check_code()` 调用 `format.check_report(self.change_files)`
-- `update/container/app/format.py` → `check_report()` / `_check_all_file_paths()` / `parse_image_prefix()`
+按分析报告要求，先确认了第 1、2 点（校验器期望路径生成规则、变更文件纳入范围），通过拉取上游 EulerPublisher 实际源码（`update/container/app/format.py` 与 `update/container/app/update.py`）取证，结论如下：
 
-对本次唯一变更文件 `README.md` 逐步代入校验逻辑，失败链路如下：
+1. **失败入口与范围**：`update.py:356` 打印的 `Difference` 来自 PR 变更文件清单，`update.py:270` 将其交由 `format.check_report()`；`format.py:181-193` 会对每个变更文件做路径校验，只要文件名（去扩展名）命中 `DOC_FILES_PATH_FORMAT`（含 `README`）就参与校验。因此任意 `README.md` 变更（无论内容）都会被纳入 appstore 预检。
 
-1. `check_report(["README.md"])` 中 `file_type = "README"`，命中全局字典 `DOC_FILES_PATH_FORMAT`，于是进入路径校验；
-2. `parse_image_prefix("README.md")`：函数开头 `if len(file.split("/")) == 1: return "", ""`，**根目录文件返回空前缀**；
-3. `_check_all_file_paths("README.md")` 计算 `correct_path = DOC_FILES_PATH_FORMAT["README"].format("", "README.md")` = `"/README.md"`；
-4. `os.path.exists("/README.md")` 为 False（`"" + "/README.md"` 变成了**文件系统绝对路径** `/README.md`，而非仓库相对路径）；
-5. 返回 `[Path Error] The expected path should be /README.md`，`fail_count += 1`，触发 `update.py:273` 的 `logger.error(...)` 并 `exit(1)`，job FAILURE。
+2. **期望路径生成缺陷**：`format.py:119-125` 的 `parse_image_prefix()` 对不含 `/` 的单段路径（根目录文件）直接返回 `("", "")`；随后 `format.py:247-252` 用 `DOC_FILES_PATH_FORMAT["README"].format("", "README.md")` 得到 `"/README.md"`。该结果被当作**绝对路径**交给 `os.path.exists()`，而仓库里只存在相对路径 `README.md`，根目录 `/README.md` 不存在，于是必然返回 `[Path Error] The expected path should be /README.md`。
 
-即：**只要 PR 变更集合里出现仓库根目录的 `README.md`，该校验必然报路径错误**，与 README 的具体文字内容无关。已在本地用 Python 完整复现该判定（`prefix=''`、`correct_path='/README.md'`、`os.path.exists=False`）。
+3. **本 PR 关联**：PR 仅修改根目录 `README.md`（`git diff --name-only origin/master...HEAD` 唯一文件），恰好触发上述缺陷。历史上该仓库根目录 `README.md` 被多次正常修改（如 `update os order`、`Add readme.en changes`），说明根目录文档变更在流程上是合法的。
 
-### 2. 为什么不做“方向 1”的改动
-- 校验结果只取决于**文件路径**（`parse_image_prefix` 对无 `/` 的文件固定返回 `""`），与 README 正文内容完全无关。因此**无论怎样编辑 `README.md` 的内容，`correct_path` 都恒为 `/README.md`，检查必然失败**。
-- 分析报告“方向 1”要求把文档移动到校验器认可的路径（如 `{prefix}/README.md`、`{prefix}/doc/...`）。这需要**新增/移动文件**（例如删除根 `README.md` 并在其他目录新建文件），而本任务明确约束：**只允许修改 `pr.changed_files` 中已存在的 `README.md`，禁止创建任何新文件**。故方向 1 在本任务的允许范围内不可执行。
-- 根目录 `README.md` 是仓库自身的说明文档，并非镜像“最小目录单元”内的 README，本不应被 appstore 发布规范校验。PR #3234 仅新增一段“通过 Issue 自动新增应用镜像”的使用指引，是合法文档改动。
+4. **为何不做代码修改**：
+   - 该校验是**纯路径校验**，不读取文件内容。任何对根目录 `README.md` 的内容改动都无法改变校验器计算出的 `prefix=""` 与 `correct_path="/README.md"`；`README.en.md`、迁移内容到其他文件、新增文件等路径均被本任务约束（只允许改 `README.md`、禁止新增文件）排除，且同样命中该缺陷。
+   - 若“消除变更”以通过校验，则等于删除本 PR 的唯一目的（新增自动化新增镜像指南），属于为绕过有缺陷的门禁而丢弃合法变更，不应由代码修复承担。
+   - 因此根因在 CI 工具侧：`parse_image_prefix` / `_check_all_file_paths` 未对根目录单段路径做归一化（应跳过根目录文档文件，或将 `""` 前缀正确拼为 `README.md` 而非 `/README.md`）。按流程这属于 `infra-error`/工具缺陷，应由 CI 维护方修复 `format.py`。
 
-### 3. 结论
-根因位于 CI 预检工具（`format.py`）对**无路径分隔符的根级文档**缺少跳过逻辑，属于工具侧规则缺陷（分析报告“方向 2”），无法且不应通过修改 PR 的 `README.md` 来消除。建议由维护者在 `format.py` 中修复，例如：`check_report` 在 `file_type in DOC_FILES_PATH_FORMAT` 后增加 `prefix` 非空判断（空前缀即仓库根级文档，跳过），或将 `parse_image_prefix` 对单段路径返回空前缀的情况排除。此修复不在本仓库 `pr.changed_files` 范围内，故本任务**不做任何代码改动**。
+综上，本任务按“无需代码修改”处理，未改动 `README.md` 或任何其他文件。
 
 ## 潜在风险
-无。未修改任何源码文件，不引入回归。
+无（未修改任何源文件）。若上游 CI 维护方不修复 `format.py` 的根路径归一化逻辑，则本 PR 及后续任何根目录 `README.md`/`README.en.md` 变更都会持续因该门禁失败；建议将本结论反馈给 CI/EulerPublisher 维护方。
