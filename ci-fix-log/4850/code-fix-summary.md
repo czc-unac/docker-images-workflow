@@ -1,24 +1,31 @@
 # 修复摘要
 
 ## 修复的问题
-新增的 `Others/glibc/2.42.9000` 镜像在 x86_64/aarch64 构建时，`wget https://mirrors.tuna.tsinghua.edu.cn/gnu/glibc/glibc-2.42.9000.tar.xz` 返回 HTTP 404，导致 Docker 构建失败。根因是该 `.9000` 后缀为 glibc 开发快照版本号，GNU release 镜像站不发布对应 tarball；将该版本修正为其对应的正式发行版 `2.43`。
+自动升级 PR #4850 使用了 GNU 镜像站并不存在的 glibc 开发期快照版本号 `2.42.9000`，导致 `wget .../glibc-2.42.9000.tar.xz` 返回 404、镜像构建失败。修复为改用它对应的正式发布版本 `2.43`。本轮核对确认 fix 分支（提交 `2f312eb53`）已包含该修复，且该修复已被实际 CI 证明有效，无需再新增代码改动。
 
 ## 修改的文件
-- `Others/glibc/2.42.9000/24.03-lts-sp4/Dockerfile`: `ARG VERSION=2.42.9000` → `ARG VERSION=2.43`（下载 URL、解压目录、`WORKDIR /opt/glibc-${VERSION}/build` 均随变量生效，无需其他改动）
-- `Others/glibc/meta.yml`: 条目键 `2.42.9000-oe2403sp4` → `2.43-oe2403sp4`（`path` 保持指向 `2.42.9000/24.03-lts-sp4/Dockerfile`）
-- `Others/glibc/README.md`: 表格行 tag/描述由 `2.42.9000-oe2403sp4` / `glibc 2.42.9000` → `2.43-oe2403sp4` / `glibc 2.43`（Dockerfile 链接路径保持不变）
-- `Others/glibc/doc/image-info.yml`: 同上表格行 tag/描述更新为 `2.43`
+- `Others/glibc/2.42.9000/24.03-lts-sp4/Dockerfile`: `ARG VERSION=2.42.9000` → `ARG VERSION=2.43`（下载 URL 仍为清华镜像站 `.../gnu/glibc/glibc-${VERSION}.tar.xz`）
+- `Others/glibc/meta.yml`: 镜像条目 `2.42.9000-oe2403sp4` → `2.43-oe2403sp4`（path 保持 `2.42.9000/24.03-lts-sp4/Dockerfile`）
+- `Others/glibc/README.md`: 标签/描述 `2.42.9000-oe2403sp4` / `glibc 2.42.9000` → `2.43-oe2403sp4` / `glibc 2.43`
+- `Others/glibc/doc/image-info.yml`: 同步标签/描述为 `2.43-oe2403sp4` / `glibc 2.43`
 
 ## 修复逻辑
-1. **证据确认（来自真实 CI 日志，非猜测）**：虽然入参 `ci_analysis` 标注日志缺失、置信度低，我从原始 PR #4850 的 CI 评论中定位到两个失败 job 并下载了控制台日志：
-   - x86_64: `https://log-ci.openeuler.openatom.cn/api/build/log?job=multiarch/openeuler/x86-64/openeuler-docker-images&build=4964`
-   - aarch64: `https://log-ci.openeuler.openatom.cn/api/build/log?job=multiarch/openeuler/aarch64/openeuler-docker-images&build=5060`
-   两架构均在 `Dockerfile:18` 的 `RUN wget .../gnu/glibc/glibc-2.42.9000.tar.xz` 步骤失败，报 `HTTP request sent, awaiting response... 404 Not Found` / `ERROR 404: Not Found.` / `exit code: 8`（错误原文：`process "/bin/sh -c wget https://mirrors.tuna.tsinghua.edu.cn/gnu/glibc/glibc-${VERSION}.tar.xz ..." did not complete successfully`）。经 `docker build` 展开后 URL 为 `glibc-2.42.9000.tar.xz`，即**模式02（下载 URL / 软件包版本不存在）**。
-2. **URL 实际访问验证**：`curl` 确认 `https://mirrors.tuna.tsinghua.edu.cn/gnu/glibc/glibc-2.42.9000.tar.xz` 返回 **404**，GNU 官方 `https://ftp.gnu.org/gnu/glibc/glibc-2.42.9000.tar.xz` 亦返回 **404**；镜像目录中仅有正式发行版 `glibc-2.42/2.43/2.44.tar.xz`。`.9000` 是 glibc 开发周期滚动版本号，只存在于 git/alpha 快照，不发布到 GNU release 镜像站。
-3. **修复方式**：遵循本仓库自动修复的既有约定（历史 auto-fix：`Database/redis/5.4.1`、`Others/dnsmasq/4.3.1`、`Others/binder/3.0` 等均只将 `ARG VERSION` 换为实际可下载版本、目录路径保持不变并同步元数据；同仓库上一轮 glibc PR #4758 的同类问题亦采用同一处理），将开发版本替换为其对应正式发行版 **2.43**，并同步 `meta.yml`、`README.md`、`image-info.yml` 三处标签，确保对外 tag 与实际构建内容一致。
-4. **可达性验证**：`curl -I https://mirrors.tuna.tsinghua.edu.cn/gnu/glibc/glibc-2.43.tar.xz` 返回 **HTTP 200**（`content-type: application/octet-stream`），目标下载链接有效。Dockerfile 其余步骤（多阶段构建、`--disable-werror` 规避 SP4 内核头文件宏重定义告警）与已验证可用的 2.42/2.43 版本一致，无需改动。
+分析报告中定位到候选A（源码包 404），本轮直接验证并确认其为唯一真实根因，候选B/C 排除：
+
+1. **候选A（确认）**：实测 `https://mirrors.tuna.tsinghua.edu.cn/gnu/glibc/glibc-2.42.9000.tar.xz`、`https://ftp.gnu.org/gnu/glibc/glibc-2.42.9000.tar.xz` 以及 kernel/aliyun/huaweicloud 等镜像站全部返回 **HTTP 404**；而 `glibc-2.43.tar.xz` 返回 **HTTP 200**。`.9000` 是 glibc 开发分支版本号（master 上 `2.42.9000` 即 2.43 的开发版，`2.43.9000` 才对应 2.44），GNU 只发布正式版本，故选 `2.43`（`2.42` 已存在且 tag 会与现有 `2.42-oe2403sp4` 冲突，不可用）。
+2. **候选B（排除）**：在 openEuler 24.03-lts-sp4 基础镜像上按该 Dockerfile 完整执行 `configure` + `make` + `make install` 全流程构建成功，仅需已有的 `bison gcc gcc-c++ make wget xz`，未出现 `These critical programs are missing or too old`。产物镜像执行 `./bin/ldd --version` 输出 `ldd (GNU libc) 2.43`。
+3. **候选C（排除）**：CI 中 `check_package_license` 为 **WARNING**（“缺少项目级Copyright声明文件”，属仓库级告警），非失败项；且现有 glibc 目录文件同样无版权头。
+4. **CI 规范校验**：用上游 `eulerpublisher/update/container/app/format.py` 的 `parse_meta_yml`/`check_report` 对本次 4 个改动文件模拟，得到 `tag=2.43-oe2403sp4`、`fail_count=0`（路径/文档规范校验通过）。
+
+真实 CI 证据（修复 PR #4873）：
+- `check_build` x86_64：**SUCCESS**（#4987/#4988）。
+- `check_build` aarch64：同一提交在门禁 #5216 中为 **SUCCESS**（Jenkins #5084，日志显示成功构建 `glibc-2.43` 并推送 `openeulertest/glibc:2.43-oe2403sp4-aarch64`、`Finished: SUCCESS`）；在门禁 #5217 中 aarch64 为 **FAILURE**（Jenkins #5083），但失败原因为
+  `FileNotFoundError: [Errno 2] No such file or directory: 'eulerpublisher'`
+  （`subprocess.call(["eulerpublisher", ...])` 找不到可执行文件），属于 CI 基础设施/工具环境问题，与本次代码改动无关。x86_64/aarch64 在环境正常时均构建成功，证明版本修复正确。
+
+结论：原 CI 失败已由 fix 分支上的 `2.42.9000 → 2.43` 修复解决；本轮 aarch64 失败为 infra-error，**无需修改代码**（强行改动会违反最小化原则）。
 
 ## 潜在风险
-- 目录路径仍为 `2.42.9000/24.03-lts-sp4` 而实际构建 `2.43`，存在路径与版本字面不一致；这与本仓库历史 auto-fix 的既有约定一致，不影响构建与镜像 tag，且避免了创建/重命名新目录（受限于只允许修改原 PR 涉及的文件）。
-- `2.43` 在 GNU 镜像站与 `2.42` 同属相邻发行版，构建工具链要求（SP4 自带 gcc/make）基本一致，预期构建可通过；最终需由 CI 复核 x86-64 与 aarch64 两个架构。
-- 本次修复不涉及对第三方/上游源文件的正则 patch，无需 `re.sub` 验证。
+- 版本目录名仍为 `2.42.9000`（受“只允许修改 PR 已涉及文件、不得新增/重命名文件”约束无法改为 `2.43`），导致元数据 tag `2.43-oe2403sp4` 与目录名不一致；仅影响可读性，`format.py` 不比较二者，不影响构建与门禁。
+- `check_package_license` 的仓库级 Copyright 告警为既有 WARNING，非阻塞项，不在本 PR 修复范围。
+- 若后续门禁再次出现 aarch64 失败，应优先核查 `eulerpublisher` 可执行文件是否在 `PATH` 中（infra），而非本次 glibc 代码。
