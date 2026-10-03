@@ -1,28 +1,22 @@
 # 修复摘要
 
 ## 修复的问题
-无需代码修复：CI 失败被分析报告判定为 infra-error（证据不足），未提供 CI 日志，无法定位根因，故不做任何代码改动。
+新增的 PyRosetta 3.15 Dockerfile 中 `ARG VERSION` 指向了上游不存在的 ref `v3.15-dev62280`，导致 `git clone --branch` 失败，镜像构建中断。
 
 ## 修改的文件
-- 无（未修改任何源码文件）
+- `HPC/pyrosetta/3.15/24.03-lts-sp4/Dockerfile`: 将 `ARG VERSION=v3.15-dev62280` 改为 `ARG VERSION=v3.15`。
 
 ## 修复逻辑
-CI 失败分析报告明确指出：
-
-- 失败类型: infra-error（证据不足）
-- 置信度: 低
-- `ci.logs` 字段内容为 `(not available — analyze based on PR diff only)`，即本次诊断**未提供任何 CI 日志**，没有构建输出、错误堆栈、job 名称或退出码。
-- 报告在"修复方向 - 方向 1"中明确要求：*"当前证据不足以定位根因，Code Fixer **不应**基于本报告猜测修改 Dockerfile。需先补齐 CI 日志后重新分析。"*
-
-报告中列出的潜在风险点（如 `ARG VERSION=v3.15-dev62280` 的 tag/branch 是否存在、`build.py` 依赖/编译问题、多架构构建差异等）均被标注为**无日志证据支撑的待验证假设，不能作为根因结论**。
-
-因此，依据 Agent 约束"如果分析报告指出是 `infra-error`（CI 基础设施问题），在 output_file 中说明无需代码修改，不要强行改代码"以及"不做任何扩展范围/猜测性修改"的原则，本次不对 `HPC/pyrosetta/3.15/24.03-lts-sp4/Dockerfile`、`HPC/pyrosetta/README.md`、`HPC/pyrosetta/doc/image-info.yml`、`HPC/pyrosetta/meta.yml` 做任何改动。
+- 分析报告的假设 1（上游版本/分支不存在）经实测证实为真实根因：
+  - 通过 `git ls-remote --tags https://github.com/RosettaCommons/rosetta.git` 及 GitHub API 校验，`v3.15-dev62280` **不存在**（API 返回 404，tag 列表中无此 ref）。
+  - 同仓库存在合法 tag `v3.15`（commit `df75a9c48e763e52a7aa3f5dfba077f4da88dbf5`，日期 2025-09-03）。
+  - 通过 GitHub Contents API 确认 `v3.15` 下存在 `source/src/python/PyRosetta/build.py`，与 Dockerfile 后续执行路径 `cd /opt/rosetta/source/src/python/PyRosetta && python3 build.py` 一致。
+- 自动升级脚本疑似机械套用了 `v2026.29-dev62280` 的命名格式，错误拼装出不存在的 `v3.15-dev62280`；实际 3.15 为上游的纯发布 tag `v3.15`。
+- 排除分析报告中的其他假设：
+  - 假设 2（`-isystem /usr/include/c++/12` 路径）：该行与已在 master 中、构建通过的 `2026.29` Dockerfile 完全一致，说明基础镜像 `openeuler/openeuler:24.03-lts-sp4` 的 GCC 12 路径正确，无需修改。
+  - 假设 3（构建依赖缺失）：`dnf install` 列表与可用的 `2026.29` 完全一致，无需修改。
+  - 假设 4（元数据一致性）：`meta.yml` / `image-info.yml` / `README.md` 中 tag 均为 `3.15-oe2403sp4`，路径 `3.15/24.03-lts-sp4/Dockerfile` 一致，无问题。
+- 本修复不涉及正则 patch 第三方/上游源文件，无正则验证要求；但已实际拉取上游 ref/tag 列表与文件树完成验证。
 
 ## 潜在风险
-无（未做任何代码改动，不引入新风险）。
-
-## 后续建议（供流程参考，非代码修复）
-1. 补齐本次 PR 的完整 CI 构建日志（clone / `python3 build.py` / pip install / 运行阶段的 stdout/stderr）。
-2. 确认失败发生的架构 job（amd64 / aarch64）及是否单一架构失败。
-3. 确认上游 `RosettaCommons/rosetta` 是否存在 tag/branch `v3.15-dev62280`。
-4. 获取日志后重新触发分析，再进行针对性修复。
+无。改动仅为修正无效的上游 ref 为真实存在的 tag，不改变构建流程、依赖或元数据；其余三个文件未做改动。
