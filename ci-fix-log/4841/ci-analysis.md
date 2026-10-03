@@ -2,54 +2,57 @@
 
 ## 基本信息
 - PR: #4841 — 【自动升级】ray容器镜像升级至2.59.0版本.
-- 失败类型: `infra-error`（证据不足，真实失败类型无法判定）
+- 失败类型: `infra-error`（证据不足）
 - 置信度: 低
 - 知识库匹配: 模式42（日志缺失无法定位）
 - 新模式标题: (不适用)
 - 新模式症状关键词: (不适用)
 
+## 前置检查说明
+
+`ci.logs` 字段值为 `(not available — analyze based on PR diff only)`，`ci.run_info` 同样不可用。**本次分析没有任何 CI 日志可供比对**，无法确认失败发生在哪个 job、哪一行、第一条 error 是什么，也无法判断日志末尾是否存在成功标志。因此以下结论均为基于 `pr.diff` 的推断，不能作为根因定论。
+
 ## 根因分析
 
 ### 直接错误
-本次上下文中 `ci.logs` 为 `"(not available — analyze based on PR diff only)"`，`ci.run_info` 为 `"(not available)"`。
-**没有任何 CI 日志可供分析**，因此不存在可引用的“最早错误信息”。
+（无可用日志，无法复制错误信息）
 
 ### 根因定位
-- 失败位置: 未知（日志缺失）
-- 失败原因: 无法确认，日志不足以定位具体错误
+- 失败位置: 未知（`ci.logs` 未提供）
+- 失败原因: 无法确认。缺少 CI 日志，任何关于具体错误的信息都属推测。
 
 ### 与 PR 变更的关联
-PR 新增 `Bigdata/ray/2.59.0/24.03-lts-sp4/Dockerfile`（FROM `openeuler/openeuler:24.03-lts-sp4`，
-`pip install ray[default]==2.59.0`，随后 `groupadd/useradd`、`USER ray`、`ENTRYPOINT ray`），
-并同步更新 `Bigdata/ray/README.md`、`Bigdata/ray/doc/image-info.yml`、`Bigdata/ray/meta.yml`。
+PR #4841 为 ray 镜像自动升级，改动集中在：
+- 新增 `Bigdata/ray/2.59.0/24.03-lts-sp4/Dockerfile`（`ARG VERSION=2.59.0`，`pip install ray[default]==${VERSION}`）
+- `Bigdata/ray/README.md`、`Bigdata/ray/doc/image-info.yml`、`Bigdata/ray/meta.yml` 增加 2.59.0 条目
 
-由于没有任何日志，无法判断失败是否由本 PR 的改动直接触发。从 diff 本身只能提出**待验证的怀疑点**，
-不能作为根因结论：
-1. `ray[default]==${VERSION}` 精确锁定 `2.59.0`，需确认上游 PyPI（及清华镜像站）确实存在该版本；
-   历史上有多个自动升级 PR 使用了上游尚不存在的版本号而失败（见模式19/模式42 案例）。
-2. 新增镜像条目仅写入 `meta.yml`，diff 中**未见** `Bigdata/image-list.yml` 的对应变更；
-   若该场景要求登记最小目录单元，可能触发 CI 一致性预检失败（参见模式11）。
+由于没有日志，无法确认失败是否由上述改动引起。以下列出仅凭 diff 观察到的**待验证风险点**（均非结论）：
+
+1. **上游版本是否真实存在（对应模式19/模式42/模式43）**：`pip install ray[default]==2.59.0` 依赖 PyPI/清华镜像站存在 `2.59.0`。若该版本尚未发布或镜像站未同步，pip 会 `No matching distribution found`。历史自动升级 PR 多次因使用不存在的上游版本号失败（#4846、#4845、#4838、#4861）。
+2. **版权/SPDX 头缺失（对应模式17）**：新增的 `Bigdata/ray/2.59.0/24.03-lts-sp4/Dockerfile` 在 diff 中**未包含** `Copyright` 与 `SPDX-License-Identifier` 头。若该仓库 CI 执行 `check_package_license`，新增文件会因缺少许可声明而失败。这是当前 diff 中最容易被 CI 预检捕获的形态问题。
+3. **`shadow` 已安装**：Dockerfile 已包含 `dnf install -y python3-pip shadow`，模式05（缺 shadow-utils）在此 diff 中**已被规避**，可排除。
+4. **`pip` 源可达性**：使用 `pypi.tuna.tsinghua.edu.cn`，属网络类问题（模式33/36），无日志无法判断。
 
 ## 修复方向
 
-> 以下均为基于 diff 的推测方向，**未经日志证实**，不能直接据此修改。
-
 ### 方向 1（置信度: 低）
-先获取下游构建 job 的完整日志，确认失败发生在哪个构建阶段（pip 解析、dnf 安装、用户创建、还是 check/发布预检），再对症处理。在拿到日志前不应改动任何文件。
+获取真实的失败 job 日志后，按日志第一条 error 定位：
+- 若为 `No matching distribution found` → 属版本不存在（模式19/42/43），应核对 ray 2.59.0 是否已在目标 pip 源发布。
+- 若为 `check_package_license` / `Copyright` / `SPDX` → 属模式17，需为新增 Dockerfile 补齐版权头。
+- 若为 `Finished: SUCCESS` 类成功标志但 PR 仍失败 → 属下游架构 job（x86-64/aarch64）失败，需拉取对应 job 日志。
 
-### 方向 2（置信度: 低）
-若日志最终证实为 `ray==2.59.0` 在上游不存在，则应回退或改用上游真实存在的版本号。
-
-### 方向 3（置信度: 低）
-若日志证实为元数据一致性问题，检查是否需要同步补充 `Bigdata/image-list.yml` 中的镜像条目。
+### 方向 2（可选）
+在无日志情况下，可优先自查上述两个静态风险点（版本存在性、许可头完整性），但**不得**在未取得日志前直接据此修改。
 
 ## 需要进一步确认的点
-1. **必须获取真实 CI 日志**：当前 `ci.logs` 为空，无法定位根因。
-   - 需获取失败 job 的日志（如 `/job/x86-64/…` 或 `/job/aarch64/…`），确认失败阶段与首条错误。
-2. 确认 `ray[default]==2.59.0` 是否在 PyPI 及 `https://pypi.tuna.tsinghua.edu.cn/simple` 实际存在。
-3. 确认 `Bigdata/ray/` 场景是否要求在 `Bigdata/image-list.yml` 中登记新增的最小目录单元。
-4. 确认 PR 的 `ci_failed` 标签来源：是构建 job 失败，还是 check/编排层 job 失败。
+1. 真正的失败 job 日志（`ci.logs` 完整内容），以确定失败类型与第一条 error。
+2. 若日志末尾为 `Finished: SUCCESS` / `Build successful`，需获取下游架构构建 job 日志（如 `/job/x86-64/…`、`/job/aarch64/…`）。
+3. `Bigdata/ray/2.59.0/24.03-lts-sp4/Dockerfile` 是否被 CI 的许可检查（`check_package_license`）覆盖，以及新增文件是否强制要求 Copyright/SPDX 头。
+4. ray 2.59.0 是否真实存在于被引用的 pip 源（PyPI / 清华镜像站）。
+5. `meta.yml` / `image-info.yml` / `README.md` 的条目格式是否通过 CI 元数据一致性校验（模式11）。
 
 ## 修复验证要求
-当前置信度为“低”，且无任何日志证据，**不允许 code-fixer 在未获得下游构建 job 日志前做任何修改**。
-若最终判定为版本号不存在或 image-list 缺失，code-fixer 须先核实上游真实制品/元数据条目后再提交，不得直接假设修复方向正确。
+当前置信度为**低**，且缺失日志，禁止在未验证前实施任何修复。要求：
+- code-fixer 必须先从 CI 获取实际失败的 `ci.logs`，确认失败类型后再决定修改方向；在日志缺失情况下**不应提交任何修复**。
+- 若最终判定为模式17（许可头缺失），需确认仓库 `check_package_license` 对 Dockerfile 的实际校验规则后再补齐，不得凭经验假设头部格式。
+- 若判定为版本不存在，code-fixer 必须从目标 pip 源（`https://pypi.tuna.tsinghua.edu.cn/simple`）实际查询 `ray` 的可用版本，确认 2.59.0 存在后再保留或调整 `ARG VERSION`。
