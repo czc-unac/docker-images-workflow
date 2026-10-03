@@ -2,46 +2,49 @@
 
 ## 基本信息
 - PR: #4857 — 【自动升级】rdkit容器镜像升级至2026.09.1版本.
-- 失败类型: infra-error（证据不足，日志缺失）
+- 失败类型: infra-error（证据不足，无法定位）
 - 置信度: 低
-- 知识库匹配: 模式42（日志缺失无法定位）
+- 知识库匹配: 模式19（证据不足 / 无法定位根因）
 - 新模式标题: (不适用)
 - 新模式症状关键词: (不适用)
 
 ## 根因分析
 
 ### 直接错误
-无可用错误信息。上下文中 `ci.logs` 明确标注为 `(not available — analyze based on PR diff only)`，`ci.run_info` 为 `(not available)`，因此不存在可供引用的第一条真实错误日志。
+上下文 `ci.logs` 的取值为：
 
 ```
-ci.run_info: (not available)
-ci.logs: (not available — analyze based on PR diff only)
+(not available — analyze based on PR diff only)
 ```
+
+`ci.run_info` 同样为 `(not available)`。即本次分析**没有提供任何 CI 日志或运行信息**，无法获取第一条 error、失败步骤、退出码或架构 job 信息。
 
 ### 根因定位
-- 失败位置: 未知（CI 日志缺失）
-- 失败原因: 无法确认。日志未提供，任何关于具体编译/下载/依赖错误的推断都缺乏日志依据。
+- 失败位置: 未知（无日志）
+- 失败原因: 无法确认。缺少 `ci.logs`，不能定位具体失败的 Dockerfile 指令、文件或依赖。
 
 ### 与 PR 变更的关联
-无法确认。本 PR 为自动升级类改动，新增 `HPC/rdkit/2026.09.1/24.03-lts-sp4/Dockerfile`，并将新版本登记进 `HPC/rdkit/README.md`、`HPC/rdkit/doc/image-info.yml`、`HPC/rdkit/meta.yml`。
+无法从日志判定。仅能基于 diff 列出**待验证的候选方向**（均未得到日志证据支持）：
 
-从 diff 可观察到若干**需进一步确认的疑点（非结论）**：
-- 构建方式用 conda：`conda install -c conda-forge --override-channels rdkit==${CONDA_VERSION} -y`，其中 `CONDA_VERSION=$(echo ${VERSION} | tr '_' '.')`，`VERSION=2026.09.1`。若 conda-forge 上不存在 `2026.09.1` 这一精确版本，该步骤会失败（对应模式02/43 类"版本不存在"）。但**日志缺失，无法验证**。
-- 该新增 Dockerfile 是否会触发 README/meta/image-info 一致性或 Copyright/SPDX 预检（模式11/17），同样**无日志可证**。
+1. **新增 Dockerfile 缺少版权/SPDX 头**（对应模式17）：新增的 `HPC/rdkit/2026.09.1/24.03-lts-sp4/Dockerfile` 内容中未看到 `Copyright` / `SPDX-License-Identifier` 头，若 CI `check_package_license` 生效可能导致失败。
+2. **conda-forge 中 `rdkit==2026.09.1` 是否存在**：`conda install -c conda-forge --override-channels rdkit==${CONDA_VERSION}` 若该精确版本未发布，会触发依赖解析失败（对应模式02/模式19 类）。
+3. **元数据一致性**：`HPC/rdkit/meta.yml`、`doc/image-info.yml`、`README.md` 三处均新增了 `2026.09.1` 条目，若 CI 有一致性/架构校验，需确认条目格式与 `image-list.yml` 完整性（对应模式11）。
 
-以上均属"差异点观察"，**不能**作为根因结论。
+以上三点仅为 diff 推断，**无日志佐证，不能作为根因结论**。
 
 ## 修复方向
-证据不足，暂无可靠修复方向。请勿在缺少日志的情况下贸然修改 Dockerfile。
+
+### 方向 1（置信度: 低）
+先获取失败 job 的真实日志（trigger/编排层 job 之外的架构构建 job，如 `/job/x86-64/…`、`/job/aarch64/…`），再依据第一条 error 定位根因。在拿到日志前不应做任何修改。
+
+### 方向 2（可选，置信度: 低）
+若后续确认属于代码/配置问题，优先排查优先级为：新增 Dockerfile 的版权头缺失 → conda-forge `rdkit==2026.09.1` 版本可用性 → 三处元数据一致性。
 
 ## 需要进一步确认的点
-1. 获取该 PR 对应 CI 运行的真实失败 job 日志（尤其架构专属构建 job，如 `/job/x86-64/…`、`/job/aarch64/…`），确认失败发生在哪个构建阶段（dnf 安装、miniconda 安装、conda 安装 rdkit，还是元数据预检）。
-2. 确认 conda-forge 上是否真实存在 `rdkit==2026.09.1`（对照 `ARG VERSION=2026.09.1`），以及 `tr '_' '.'` 的转换是否与上游 tag 命名规则一致。
-3. 确认 `HPC/rdkit/meta.yml`、`doc/image-info.yml`、`README.md` 的新增条目是否符合 CI schema 与一致性校验（模式11）。
-4. 确认新增的 3 个文件是否已包含项目要求的 Copyright / SPDX 头（模式17）。
+1. 获取本次 PR 实际失败 job 的完整日志，确认失败发生在哪个阶段（预检 `check_package_license` / 元数据校验 / 还是 amd64、arm64 架构构建）。
+2. 确认新增 Dockerfile `HPC/rdkit/2026.09.1/24.03-lts-sp4/Dockerfile` 是否需要补 `Copyright` + `SPDX-License-Identifier` 头（对照同目录既有 rdkit Dockerfile 的头部约定）。
+3. 确认 conda-forge 仓库中是否存在 `rdkit==2026.09.1` 这一精确版本；若不存在，`ARG VERSION=2026.09.1` 与 `tr '_' '.'` 的转换逻辑需核对（历史 rdkit 目录存在 `2026_03_3` 与 `2026.03.6` 两种命名）。
+4. 确认 `HPC/rdkit/image-list.yml`（若存在）是否需同步新增 `2026.09.1` 条目（README 未提及当前改动涉及该文件）。
 
 ## 修复验证要求
-本报告置信度为"低"，且无日志支撑。code-fixer **在获得真实失败日志之前不得提交任何修复**。若后续确认修复方向涉及正则 patch 或版本号核对：
-- 必须从 conda-forge 官方渠道（或 Dockerfile `ARG VERSION` 指定版本的官方来源）验证目标版本 `2026.09.1` 确实存在且可被 `rdkit==${CONDA_VERSION}` 精确匹配后，方可提交。
-
-> 备注：本报告依据核心约束——日志缺失时判定为证据不足；失败类型标记为 `infra-error`（证据不足），置信度"低"。若该 PR 的失败实际由下游架构构建 job 引起而 trigger 层日志显示成功，处理方式同上：需获取下游构建 job 日志方能定位。
+本次结论置信度为低且缺失日志，code-fixer **不得基于本报告直接修改**。必须先取得下游/架构构建 job 的真实日志，验证失败类型后再处理；若确认失败为编排层或 runner 基础设施问题（infra-error），则 Code Fixer 无需处理。
