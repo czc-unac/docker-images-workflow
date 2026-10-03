@@ -777,6 +777,7 @@ RUN sed -i 's/#define HAS_RGBTOUVMATRIXROW_NEON/\/\/#define HAS_RGBTOUVMATRIXROW
 
 **历史案例**:
 - PR #2991: `Others/vvenc/1.14.0/24.03-lts-sp4/Dockerfile` — 在 cmake 配置阶段添加 `-DVVENC_ENABLE_WERROR=OFF`，避免因 openEuler 24.
+- PR #4861: `HPC/lammps/2026.09.30/24.03-lts-sp4/Dockerfile` — LAMMPS 自动升级 PR 使用了不存在的上游 tag `stable_2026.09.30`，导致 Dockerfi
 
 ---
 
