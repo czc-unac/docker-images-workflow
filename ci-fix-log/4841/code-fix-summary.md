@@ -1,28 +1,29 @@
 # 修复摘要
 
 ## 修复的问题
-CI 分析报告判定为 `infra-error`（日志缺失、置信度低），未做任何代码修改；经核实 PR 变更本身不存在可复现的代码缺陷。
+无需代码修改。CI 失败分析报告判定为 `infra-error`（证据不足，无 CI 日志），经静态核查确认本 PR 改动本身完整、正确，不存在可归因于代码的失败根因。
 
 ## 修改的文件
-- 无（未修改任何文件）
+- 无（未对 `Bigdata/ray/2.59.0/24.03-lts-sp4/Dockerfile`、`Bigdata/ray/README.md`、`Bigdata/ray/doc/image-info.yml`、`Bigdata/ray/meta.yml` 做任何改动）
 
 ## 修复逻辑
-分析报告明确指出：
-- 失败类型为 `infra-error`，`ci.logs` 与 `ci.run_info` 均为空（`(not available)`），无任何日志可供定位根因；
-- 报告结论为"不允许 code-fixer 在未获得下游构建 job 日志前做任何修改"。
+分析报告明确给出：`ci.logs` 与 `ci.run_info` 均不可用（值为 `(not available — analyze based on PR diff only)`），失败类型为 `infra-error`，置信度低，并明确要求"在日志缺失情况下不应提交任何修复"。因此不实施猜测性改动。
 
-因此按要求不强行改代码。同时，对报告中提出的三个"待验证怀疑点"逐条核实，均不成立：
+在无日志前提下，我针对报告列出的静态风险点做了可验证的排查，结论如下：
 
-1. **版本号不存在？** 否。
-   - PyPI JSON 接口显示 `2.59.0` 存在：`https://pypi.org/pypi/ray/json` 中 `releases` 含 `2.59.0`。
-   - 清华镜像站同样存在该版本轮子：`https://pypi.tuna.tsinghua.edu.cn/simple/ray/` 返回 `ray-2.59.0-cp310-...-manylinux2014_x86_64.whl`、`...-manylinux2014_aarch64.whl` 等。
-2. **缺少 `Bigdata/image-list.yml` 登记？** 否。
-   - 该文件已包含 `ray: ray` 条目，无需补充。
-3. **Dockerfile 结构异常？** 否。
-   - 新增的 `Bigdata/ray/2.59.0/24.03-lts-sp4/Dockerfile` 与既有 `2.58.0/24.03-lts-sp4/Dockerfile` 完全一致，仅 `ARG VERSION` 不同，符合自动升级惯例。
-   - `README.md`、`doc/image-info.yml`、`meta.yml` 的新增条目与既有格式一致，标签 `2.59.0-oe2403sp4` 与目录 `24.03-lts-sp4` 对应正确。
+1. **上游版本存在性（报告风险点 1，模式 19/42/43）— 已排除**
+   从 Dockerfile 实际使用的 pip 源查询：`https://pypi.tuna.tsinghua.edu.cn/simple/ray/` 中存在 `ray-2.59.0`，并且包含 `cp311-cp311-manylinux2014_x86_64.whl` 与 `cp311-cp311-manylinux2014_aarch64.whl`，即 amd64/arm64 双架构 wheel 均可用（基础镜像 24.03-lts-sp4 提供 python3.11）。同时上游 GitHub `ray-project/ray` 存在 tag `ray-2.59.0`。故 `pip install ray[default]==2.59.0` 不会因版本不存在而失败。
 
-结论：PR 变更无代码级问题，失败原因在 CI 基础设施侧，需获取下游构建 job 的真实日志后方能进一步判定。
+2. **Copyright/SPDX 许可头缺失（报告风险点 2，模式 17）— 不适用**
+   核查同目录既有文件 `Bigdata/ray/2.58.0/24.03-lts-sp4/Dockerfile` 及 ray 的 `README.md`、`meta.yml`、`doc/image-info.yml`，均**不含** Copyright/SPDX 头；且历史提交 `90442ee6c`（新增 2.58.0 目录）即以完全相同、无许可头的方式合入 master。可见 `Bigdata/ray` 并未被 `check_package_license` 强制要求许可头，因此不应凭经验为 2.59.0 新增许可头。
+
+3. **`shadow` 依赖（报告风险点 3，模式 05）— 已规避**
+   Dockerfile 第 6 行已包含 `dnf install -y python3-pip shadow`，与 2.58.0 一致。
+
+4. **元数据一致性（模式 11）— 一致**
+   `Dockerfile ARG VERSION=2.59.0`、`README.md` 的 `2.59.0-oe2403sp4` 行、`doc/image-info.yml` 的 `2.59.0-oe2403sp4` 行、`meta.yml` 的 `2.59.0-oe2403sp4: path: 2.59.0/24.03-lts-sp4/Dockerfile` 四处版本号完全对应；`meta.yml` 缺少行尾换行属该目录既有惯例（多数 `Bigdata/*/meta.yml` 均无行尾换行），非本次引入的问题。
+
+综上，报告中的两个"最易被 CI 预检捕获"的静态风险点均已被证伪，diff 与历史成功升级（2.58.0）的形态完全一致，不存在应当修复的代码缺陷。
 
 ## 潜在风险
-无。未做任何改动，不影响现有功能。
+无。未修改任何文件，不会引入新问题。
