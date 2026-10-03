@@ -2,49 +2,74 @@
 
 ## 基本信息
 - PR: #4851 — 【自动升级】milvus容器镜像升级至3.0.2版本.
-- 失败类型: infra-error（证据不足）
+- 失败类型: build-error
 - 置信度: 低
-- 知识库匹配: 模式19（证据不足 / 无法定位根因）
-- 新模式标题: (不适用)
-- 新模式症状关键词: (不适用)
+- 知识库匹配: 模式42（日志缺失无法定位）
+- 新模式标题: (不适用，已匹配模式42)
+- 新模式症状关键词: (不适用，已匹配模式42)
+
+> **前置说明（证据状态）**：本次上下文 `ci.logs` 为 `(not available — analyze based on PR diff only)`，
+> `ci.run_info` 为 `(not available)`。**没有任何 CI 日志可供分析**，因此无法确定失败发生的阶段、命令与
+> 第一条真实错误。按角色约束，本报告将标注"证据不足"，所有根因均只能来自 `pr.diff` 的静态推断，
+> 不能作为确诊结论。下文各方向均为待验证假设，请以获取实际日志后为准。
 
 ## 根因分析
 
 ### 直接错误
-```
-ci.run_info: "(not available)"
-ci.logs:     "(not available — analyze based on PR diff only)"
-```
-上下文中**未提供任何 CI 日志**，无法复制关键错误信息。
+无。上下文未提供任何日志，不存在可引用的错误信息。
 
 ### 根因定位
-- 失败位置: 未知（日志缺失）
-- 失败原因: 没有任何构建/测试输出可供定位，首个 error、失败 job、失败阶段均无法确认。
+- 失败位置: 未知（无日志）
+- 失败原因: 无法确定。仅能确认本 PR 新增了一个全新镜像构建单元，属于"新增镜像自动升级"类改动，典型失败点集中在：镜像许可证头校验、上游版本/tag 是否存在、Dockerfile 构建阶段依赖与产物路径。
 
 ### 与 PR 变更的关联
-无法确认。本次 PR 为自动升级，改动为：
-1. 新增 `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile`（53 行新文件，多阶段构建：builder 内下载 Go 1.24.2、安装 Rust 1.73 / conan 1.61.0、`git clone -b v3.0.2 milvus` 后 `install_deps.sh` + `make build-cpp` + `make build-go`；运行阶段安装 etcd 3.5.0、minio）。
-2. `Database/milvus/README.md`、`Database/milvus/doc/image-info.yml`、`Database/milvus/meta.yml` 增加 3.0.2-oe2403sp4 条目。
+本 PR 共改动 4 个文件：
 
-仅凭 diff 无法判断失败是否由上述改动引起。
+1. **新增** `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile`（53 行，全新文件，多阶段构建）。
+2. **修改** `Database/milvus/README.md`：新增 `3.0.2-oe2403sp4` 表格行。
+3. **修改** `Database/milvus/doc/image-info.yml`：新增同一 tag 行。
+4. **修改** `Database/milvus/meta.yml`：新增 `3.0.2-oe2403sp4: path: 3.0.2/24.03-lts-sp4/Dockerfile`。
+
+该改动本身是元数据与 Dockerfile 的配套新增，无删除逻辑。若 CI 失败，最可能由以下 diff 可观察特征触发（均为待验证假设）：
+
+- **许可证头缺失（对照模式17）**：新增的 `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile` 正文
+  直接以 `ARG BASE=openeuler/openeuler:24.03-lts-sp4` 开头，**未包含** `# Copyright ... All rights reserved.`
+  与 `# SPDX-License-Identifier: MulanPSL-2.0` 头。CI 的 `check_package_license` 校验对新增文件逐个检查，缺失时预检阶段即失败。
+- **上游版本/tag 不存在（对照模式02/19/42）**：Dockerfile 使用 `git clone -b v${VERSION} https://github.com/milvus-io/milvus.git`
+  （`VERSION=3.0.2`），要求上游存在 `v3.0.2` tag。若该 tag 不存在或为空，构建会以 `exit 128` 失败。
+  本仓库历史上有 milvus `3.0-beta` 被视为不稳定版本的先例（模式11/历史 PR #2269）。
+- **构建阶段依赖/产物路径**：Dockerfile 中 `./scripts/install_deps.sh`、`make build-cpp`、`make build-go`，
+  以及后续 `COPY --from=builder /milvus/internal/core/output/lib64/`、`/milvus/internal/core/output/lib/*.so*`
+  等路径依赖 Milvus 3.0.2 上游实际产物布局。若上游布局与 2.x 不同，会出现路径不存在或编译错误（对照模式10/12）。
+- **`ENV PATH=$PATH:/milvus/bin/` 自引用**：BuildKit 可能产生 `UndefinedVar`（对照模式20），但只属警告，一般非致命失败原因。
+
+以上特征都只能解释"可能失败"，无法替代真实日志。**不能据此断定根因。**
 
 ## 修复方向
 
-### 方向 1（置信度: 低）— 主判定
-先补齐失败 job 的真实日志，再定位根因。当前证据不足以指向任何具体代码/构建问题，**不应在无日志情况下臆测修复**。
+### 方向 1（置信度: 低）— 补齐新增文件的版权/SPDX 头
+参照模式17，为新增的 `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile` 添加 openEuler 仓库要求格式的
+Copyright 与 SPDX-License-Identifier 头。该方向只能解释预检类失败，若日志显示失败发生在 Docker build
+阶段则不成立。
 
-### 方向 2（置信度: 低，diff 推断的候选，需日志确认）
-仅从 diff 可观察到一个候选风险点：新增的 `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile` **文件头缺少 Copyright 与 SPDX-License-Identifier 声明**（文件以 `ARG BASE=...` 开头）。若 CI 包含许可证预检（参见历史模式17 `check_package_license`），该新文件可能因此被判定失败。此推断**无日志佐证**，仅供参考，须以实际日志为准。
+### 方向 2（置信度: 低）— 核实上游 milvus `v3.0.2` tag/tag 名格式
+若日志出现 `Remote branch ... not found`、`couldn't find remote ref`、`exit code: 128` 等，则为版本/tag 问题
+（模式02/19/42）。需确认 `v3.0.2` 是否为上游正确 tag 名。
+
+### 方向 3（置信度: 低）— 核对构建依赖与产物路径
+若日志出现 `Could NOT find`、`No such file or directory`、`failed to calculate checksum`、编译报错等，
+需按实际报错补齐 `-devel` 包或修正 `COPY` 源路径（模式10/12/6）。
+
+> 上述三个方向互斥，**在拿到真实日志前不应同时套用**。禁止在无日志情况下直接修改 Dockerfile。
 
 ## 需要进一步确认的点
-1. 失败发生在哪个阶段：是 appstore/许可证/元数据预检，还是 x86-64 / aarch64 架构构建 job。
-2. 需要获取下游架构构建 job 的日志（如 `/job/x86-64/…` 或 `/job/aarch64/…`），当前 `ci.logs` 不可用。
-3. 若为构建失败，需确认 `git clone -b v3.0.2 https://github.com/milvus-io/milvus.git` 的 tag `v3.0.2` 在上游是否存在。
-4. 需确认 `./scripts/install_deps.sh`、`make build-cpp`、`make build-go` 在 openEuler 24.03-LTS-SP4 上的依赖是否齐全（openblas-devel / libaio / hdf5 / ninja 等）。
-5. 需确认新增 Dockerfile 是否因缺 Copyright/SPDX 头触发许可证预检（模式17 候选）。
-6. 需确认 `meta.yml` / `image-info.yml` / `README.md` 新增条目是否通过格式与一致性校验。
+1. **获取本次 CI 的实际失败日志**（trigger/编排层之外的架构构建 job，如 x86-64 / aarch64 的 build job）。
+2. 确认失败发生在哪个阶段：许可证预检、YAML/元数据预检，还是 Docker build。
+3. 若为 Docker build：确认第一条 error 出现在哪个 `RUN` 步骤。
+4. 核实上游 `milvus-io/milvus` 是否存在 `v3.0.2` tag，以及 3.0.2 是否为稳定发布版本。
+5. 确认 `Database/milvus/3.0.2/24.03-lts-sp4/Dockerfile` 是否为唯一需要补版权头的新增文件。
 
 ## 修复验证要求
-当前置信度为"低"，且无任何日志，**不具备可执行的修复方向**。在获取失败 job 的真实日志前，code-fixer 不应提交任何修改。
-
-若后续日志确认根因为上述"方向 2"（Dockerfile 缺少版权头），code-fixer 必须先核对本仓库 CI 许可证检查的实际规则与其他 `Database/milvus/` 下 Dockerfile 的文件头格式，再补充对应 Copyright + SPDX 声明；不得仅凭本报告的推断直接提交。
+证据不足（置信度低），code-fixer **必须先获取并阅读真实 CI 日志**，确认失败阶段与第一条错误后，
+再选择对应方向修改；**不得**仅凭本报告假设直接改动。若日志确认失败发生在 Docker build 阶段，
+需对照上游 milvus 3.0.2 源码实际目录布局验证 Dockerfile 中的依赖安装命令与 `COPY` 产物路径。
