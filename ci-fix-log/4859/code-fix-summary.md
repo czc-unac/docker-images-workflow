@@ -1,39 +1,38 @@
 # 修复摘要
 
 ## 修复的问题
-无需修改源代码。经获取真实 CI 日志核实，本 PR 的唯一失败项 `aarch64 check_build` 属于 CI 基础设施/运行环境问题（aarch64 构建节点缺少 `eulerpublisher` 可执行文件），grafana 13.2.3 镜像本身已成功构建并推送，与 PR 修改的文件无关。
+无需代码修复。经拉取 GitCode 门禁真实日志核实，本次 CI 失败属于 **infra-error（CI 基础设施/环境问题）**，与本 PR 改动的 Dockerfile、entrypoint.sh、README.md、image-info.yml、meta.yml 无关。
 
 ## 修改的文件
-- 无（未修改任何源文件，保持 PR 原始内容不变）
+- 无（未修改任何文件）
 
 ## 修复逻辑
 
-### 真实 CI 结果（来自 PR #4859 的 openeuler-bot 评论，2026-10-03T15:25）
-| Check Name | Build Result |
-|---|---|
-| check_package_license | ⚠ WARNING（非失败：缺少项目级 Copyright 声明文件） |
-| check_sca | ✅ SUCCESS |
-| x86_64 `check_build` | ✅ SUCCESS |
-| aarch64 `check_build` | ❌ FAILED |
+原始分析报告基于 diff 静态推断（无日志），给出低置信度的两个可疑点。经实际验证均不成立，并定位到真实根因：
 
-- 触发层日志（job 5202）：`Finished: SUCCESS`；
-- x86_64 构建日志（job 4973）：`Finished: SUCCESS`，镜像 push 成功并通过 `[Check]` 镜像测试；
-- aarch64 构建日志（job 5069）：镜像 **构建成功**（`#9 DONE 148.5s`、`Complete!`）、**推送成功**（`#10 DONE 104.2s`、`[Build] finished` / `[Push] finished`），失败发生在推送之后的 CI 自有后处理步骤：
-  ```
-  File ".../eulerpublisher/update/container/app/update.py", line 256, in check_updates
-    if _check_app_image(file=file) != 0:
-  ...
-  FileNotFoundError: [Errno 2] No such file or directory: 'eulerpublisher'
-  Build step 'Execute shell' marked build as failure
-  ```
+1. **排除可疑点 A（Dockerfile 续行符/arm64 分支）**
+   - `Cloud/grafana/13.2.3/24.03-lts-sp4/Dockerfile` 与已合入 master 的 13.2.2 版本逐字节差异仅为 `ARG VERSION=13.2.2` → `13.2.3`；报告中提到的 `\ `（反斜杠+空格）续行在仓库所有 grafana 版本中一致存在，且 arm64 分支实际已写入 `BUILDARCH="aarch64"`（报告所引 diff 有误）。
+   - 本地实测：`docker build --check` 对 13.2.3 Dockerfile 报告 `Check complete, no warnings found`；`docker build` 成功安装 `grafana-enterprise-13.2.3-1.x86_64` 并完成镜像导出。构造 `\ ` 续行的最小 Dockerfile 亦被 BuildKit 正常解析（判定为续行）。因此续行符与 Dockerfile 语法不是失败原因。
 
-### 各可疑点逐一排除
-1. **许可/Copyright（分析报告可疑点 A）**：触发层日志明确显示仓库 license 检查 `pass`，copyright 缺失仅为 `WARNING`（且为仓库级既有问题，非本 PR 引入），未导致门禁失败。grafana 目录下 32 个 Dockerfile 均无 SPDX/Copyright 头，属仓库既有约定，不构成本次失败原因，且修复被禁止新增文件。
-2. **Dockerfile 反斜杠尾随空格（分析报告可疑点 B）**：日志显示该 RUN 指令被正确解析，x86_64 与 aarch64 均成功执行安装并构建出镜像；且 13.2.2 基线存在完全相同写法。非失败原因。
-3. **RPM 下载可用性（分析报告方向 3）**：已实测 `https://dl.grafana.com/enterprise/release/grafana-enterprise-13.2.3-1.x86_64.rpm` 与 `...-1.aarch64.rpm` 均返回 HTTP 200；aarch64 日志中实际成功下载 `grafana-enterprise-13.2.3-1.aarch64.rpm`。非失败原因。
+2. **排除 RPM 404 与许可证问题**
+   - `https://dl.grafana.com/enterprise/release/grafana-enterprise-13.2.3-1.{x86_64,aarch64}.rpm` 均返回 HTTP 200。
+   - 仓库 Cloud/grafana 下所有 Dockerfile 均无 Copyright/SPDX 头，属既有约定；`check_package_license` 结果为 WARNING（“缺少项目级 Copyright 声明文件”，为仓库级告警）而非失败项。
 
-### 结论
-失败根因为 CI 基础设施问题（aarch64 构建节点 `eulerpublisher` 命令缺失），非源码缺陷。按流程约定，infra-error 情况不做代码修改，避免引入无关改动。
+3. **定位真实根因（实际的 CI 门禁记录）**
+   - PR #4859 门禁评论（2026-10-03T15:25:32）结果：
+     - `check_package_license`: WARNING（非失败）
+     - `check_sca`: SUCCESS
+     - `x86_64 check_build`: SUCCESS
+     - `aarch64 check_build`: **FAILED**
+   - 拉取 aarch64 构建日志（`multiarch/openeuler/aarch64/openeuler-docker-images#5069`）显示：镜像构建与推送**全部成功**（`[Build] finished` / `[Push] finished`，`grafana-enterprise-13.2.3-1.aarch64` 已安装），失败发生在构建后的 `eulerpublisher/update/container/app/update.py` 检查步骤：
+     ```
+     FileNotFoundError: [Errno 2] No such file or directory: 'eulerpublisher'
+     Build step 'Execute shell' marked build as failure
+     ```
+     即 aarch64 Jenkins 执行机上缺失 CI 工具 `eulerpublisher` 可执行文件，属 CI 环境配置问题。
+   - 对照 x86_64 构建日志（`#4973`）在同样流程下走到 `[Check]` 并 `Finished: SUCCESS`，两架构日志中均出现相同的 `find: command not found`、`%post(grafana-enterprise...) scriptlet failed` 告警，但该告警在两架构都出现且不影响构建/推送，属上游 RPM 在缺失 findutils 的基础镜像中的既有告警，非本次失败原因。
+
+**结论**：PR 涉及的 5 个文件无需修改。修复方向应为 CI 侧修复 aarch64 执行机环境（安装/修复 `eulerpublisher`），该改动不属于本 PR 允许修改的文件范围。
 
 ## 潜在风险
-无。未改动任何源文件，不会影响镜像构建或既有功能。建议在基础设施侧修复 aarch64 节点（确保 `eulerpublisher` 可执行文件在 PATH 中）后重跑门禁。
+无。本次未对源码仓库做任何改动，不会引入回归；建议由 CI 基础设施维护方修复 aarch64 节点缺失 `eulerpublisher` 的问题后重跑门禁。
