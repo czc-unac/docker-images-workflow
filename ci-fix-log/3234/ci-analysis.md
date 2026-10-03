@@ -4,7 +4,7 @@
 - PR: #3234 — docs: add automated new-image request guide
 - 失败类型: lint-error
 - 置信度: 中
-- 知识库匹配: 模式11
+- 知识库匹配: 模式11（YAML / 元数据文件错误 —— appstore 发布规范路径预检）
 - 新模式标题: (不适用)
 - 新模式症状关键词: (不适用)
 
@@ -12,11 +12,10 @@
 
 ### 直接错误
 ```
-2026-09-15 09:16:26,553 .../update/container/app/update.py[line:356]-INFO: Difference: [
+2026-09-15 09:16:26,553-...update.py[line:356]-INFO: Difference: [
     "README.md"
 ]
-2026-09-15 09:16:31,258 .../update/container/app/update.py[line:222]-INFO: Clone https://gitcode.com/qq_42020325/****-docker-images.git successfully.
-2026-09-15 09:16:31,262 .../update/container/app/update.py[line:273]-ERROR: There are some specification errors for releasing on appstore in this PR, please check as above.
+2026-09-15 09:16:31,262-...update.py[line:273]-ERROR: There are some specification errors for releasing on appstore in this PR, please check as above.
 +-------------+-----------------------------------------------------+--------------+
 | Check Items |                     Description                     | Check Result |
 +-------------+-----------------------------------------------------+--------------+
@@ -27,24 +26,28 @@ Finished: FAILURE
 ```
 
 ### 根因定位
-- 失败位置: eulerpublisher `update/container/app/update.py:273`（appstore 发布规范预检），触发点为本次 PR 唯一改动文件 `README.md`
-- 失败原因: 本次 diff 仅修改根目录 `README.md`（新增"新增应用镜像可通过 Issue 由流水线自动生成"的文档说明）。CI 在 appstore 发布规范预检阶段计算变更差异，得到 `Difference: ["README.md"]`，随后对该文件做发布路径校验并判定 `[Path Error] The expected path should be /README.md`，预检失败导致 job 失败。
+- 失败位置: `eulerpublisher/update/container/app/update.py:273`（appstore 发布规范预检），触发项为仓库根目录 `README.md`
+- 失败原因: 本 PR 仅修改仓库根目录 `README.md`，eulerpublisher 的 appstore 发布规范预检将变更文件 `README.md` 判为「路径不合规」（期望路径 `/README.md`），预检返回 FAILURE，整个流水线被标记为失败。
 
 ### 与 PR 变更的关联
-- 直接关联：`ci.logs` 中 `Difference: ["README.md"]` 与 `pr.diff` 中唯一改动文件 `a/README.md / b/README.md` 完全一致，可确认失败由本次对根目录 README.md 的修改触发。
-- 注意：日志末尾为 `Finished: FAILURE`（非 SUCCESS），因此不属于"日志成功但状态失败"的证据不足场景，可继续分析。
-- 语义疑点：校验信息 "The expected path should be /README.md" 与被检文件路径（本身就是根目录 `README.md`）表面矛盾，说明该预检对"非镜像类文件（文档）混入发布变更集"的处理逻辑不清晰，无法仅凭日志 100% 断定是代码问题还是 CI 预检误判。
+- PR diff 仅对 `README.md` 增加 12 行（新增「提交 Issue 自动化生成镜像」说明），未新增/修改任何镜像目录（Dockerfile、meta.yml、image-info.yml）。
+- CI 日志中 `Difference: ["README.md"]` 明确表明本次预检只看到 `README.md` 一个差异文件，失败完全由该文档改动触发。
+- 也就是说，本次失败与镜像构建本身无关，是 appstore 发布规范预检对「根目录 README.md 变更」的路径校验不通过所致。该行为与知识库模式11 中的历史案例（PR #2512，`.claude/README.md` 路径不符合 appstore 规范预检）属同一类「README 路径预检」问题。
 
 ## 修复方向
 
 ### 方向 1（置信度: 中）
-若 CI 预期根目录 README.md 的变更不应进入 appstore 发布规范校验，则这是预检工具（eulerpublisher `update.py`）对文档类变更的误判。修复思路：调整/拆分变更，使文档改动不落入该发布校验的差异集（例如将文档并入被 CI 识别为文档/忽略的路径，或在 CI 侧为根目录 README.md 增加豁免），不修改任何镜像构建文件。
+- 调整提交内容，避免让「仅文档类的顶层 README.md 变更」进入 appstore 发布规范预检的变更文件集合：
+  - 方案 A：将本次新增的「自动生成新镜像」指南移动到仓库中预检允许的文档位置（例如独立文档目录，而非顶层 README.md），并相应更新引用；
+  - 方案 B：若预检确实只接受镜像目录内的 `README.md`（如 `{场景}/{镜像}/{版本}/README.md`），则不要把该说明加到顶层 `README.md`，而是以不触发发布预检的形式（如单独的 docs 文件）承载。
+- 依据：日志显示预检把 `README.md` 判定为 `[Path Error]`，说明顶层 README.md 不在该预检允许的 appstore 发布路径白名单内。
 
-### 方向 2（置信度: 中）
-若该预检要求被变更文件必须落在某个合法镜像目录结构内（两级 `{image-version}/{os-version}/`），则根目录 README.md 天然不满足。修复思路：将本次新增文档内容放置到 CI 校验认可的文档路径下，或在提 PR 时仅提交被发布框架允许的文件类型。
+### 方向 2（置信度: 低）
+- 若确认「修改顶层 README.md 不应触发 appstore 发布预检」，则这属于 CI 编排工具的误报，需要 eulerpublisher 侧的预检逻辑对非镜像类文件（纯文档）做过滤，而非在 PR 内改代码。此种情况下 Code Fixer 无需处理该失败，应联系 CI 运维调整工具。
 
 ## 需要进一步确认的点
-- 需确认 `eulerpublisher update.py` 的 appstore 发布规范校验（约 line 273 前后）对 `README.md` 的判定规则：为何对路径已是根目录的 `/README.md` 仍报 `[Path Error] The expected path should be /README.md`。
-- 需确认本次失败是否为"纯文档 PR 误触发发布预检"的既有 CI 行为（可参考模式11历史案例 PR #2512 中 `.claude/README.md` 等路径预检失败），还是本次 README.md 新增内容本身包含被误识别为镜像条目的文本。
-- 需确认历史同类纯文档 PR（如模式19案例 #2308 `AI/diskann/README.md`）当时是否也触发该预检、最终如何处理。
-- 若确认为 CI 预检工具缺陷或豁免规则缺失，应标记为 infra-error 并由 CI 维护方处理，而非修改本 PR 的文档内容。
+- 日志未提供 eulerpublisher `update.py` 预检白名单/路径规则的完整代码，无法确认：
+  1. 顶层 `README.md` 是否本就**不允许**出现在 appstore 发布预检的变更文件集合中（即是否应过滤纯文档文件）。
+  2. 报错文案「The expected path should be /README.md」的具体判定逻辑（为何根目录的 `README.md` 会被判为路径错误）。
+- 需确认 trigger 层为何对「仅文档变更」的 PR 仍执行 appstore 发布规范预检：是否是 trigger job 对 PR 类型判断有误，或对 `note` 触发的流水线一律执行预检。
+- 需确认本仓库对顶层 `README.md` 更新的既有约定（历史上是否有同类文档 PR 通过 CI，或都需要特殊处理）。
