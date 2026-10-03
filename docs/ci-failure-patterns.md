@@ -442,6 +442,7 @@ COPY --from=agent-source /bin/grafana-agent /usr/local/bin/grafana-agent
 - PR #4717: `Cloud/qemu/11.1.2/24.03-lts-sp4/Dockerfile` — `Cloud/qemu/11.1.2/24.03-lts-sp4/Dockerfile` 中构建版本被写成了 `11.1
 - PR #4846: `Others/binder/0.2.0/24.03-lts-sp4/Dockerfile` — 自动升级单使用了上游不存在的版本号 `0.2.0`（keybinder-3.0 系列无 0.2.0 发布，0.2.x 属
 - PR #4845: `Others/rabitq-library/0.5.1/24.03-lts-sp4/Dockerfile` — 新增的 rabitq-library 0.5.1 Dockerfile 在 `git checkout` 时缺少上游 t
+- PR #4838: `HPC/openfoam/20260907/24.03-lts-sp4/Dockerfile` — 将 openfoam Dockerfile 中不存在的版本 `20260907` 修正为上游真实存在的版本 `2606`
 
 ---
 
