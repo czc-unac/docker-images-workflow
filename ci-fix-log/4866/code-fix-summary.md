@@ -1,27 +1,24 @@
 # 修复摘要
 
 ## 修复的问题
-修正新增 Dockerfile 中 openEuler 24.03-LTS-SP4 不存在的 C++ 编译器包名 `gcc-toolset-14-c++*`，改为实际存在的 `gcc-toolset-14-gcc-c++*`，使构建阶段的 `yum install` 不再报错。
+将 `cmake==3.28` 修正为 PyPI 上真实存在的 `cmake==3.28.4`，解决构建阶段 `No matching distribution found for cmake==3.28` 的失败。
 
 ## 修改的文件
-- `AI/onnxruntime/1.30.0/24.03-lts-sp4/Dockerfile`: 将 `yum install` 列表中的 `gcc-toolset-14-c++*` 改为 `gcc-toolset-14-gcc-c++*`。
+- `AI/onnxruntime/1.30.0/24.03-lts-sp4/Dockerfile`: 第 29 行 `cmake==3.28` → `cmake==3.28.4`
 
 ## 修复逻辑
-分析报告的候选根因因缺少日志而无法确认，本次先从 PR 门禁评论中取得真实失败 job 日志：
-
-- x86_64 check_build #4980：`No match for argument: gcc-toolset-14-c++*` / `Error: Unable to find a match: gcc-toolset-14-c++*`
-- aarch64 check_build #5076：同样报错 `Error: Unable to find a match: gcc-toolset-14-c++*`
-
-两个架构都精确失败在 Dockerfile 第 8 行的 `RUN yum update -y && yum install ...` 步骤。
-
-对照 openEuler 官方仓库 `everything` 源核实包名：
-- 24.03-LTS-SP4（x86_64 与 aarch64）中 C++ 编译器包为 `gcc-toolset-14-gcc-c++-14.3.1-18.oe2403sp4`，不存在任何 `gcc-toolset-14-c++*` 包。
-- 24.03-LTS-SP2（旧版 1.22.1 Dockerfile 所基于的版本）中确实存在 `gcc-toolset-14-c++-14.2.1-8.oe2403sp2`，因此同一写法在 sp2 能通过、在 sp4 会失败，属于基础镜像版本升级导致的包名变化（`c++` → `gcc-c++`）。
-
-同时核实 `microsoft/onnxruntime` 上游存在 `v1.30.0` tag（已通过 GitHub API 确认），故分析报告候选根因 1（上游 tag 不存在）不成立，无需修改 `ARG VERSION`。
-
-报告候选根因 3（gitee/atomgit 链接、末行换行）经核对：仓库中 `gitee.com/openeuler/openeuler-docker-images` 链接为多数既有用法，且该差异不会导致 check_build 失败，故不做改动（不扩展范围）。
+1. 分析报告本身未附带 `ci.logs`（由于日志抓取正则只匹配 `ci.openeuler.openatom.cn`，而 CI 机器人现已改为评论 `log-ci.openeuler.openatom.cn`，导致分析阶段取不到日志）。为取得真实根因，本次直接从 GitCode API 拉取了修复 PR #4878 的门禁结果，并通过 openEuler Jenkins 日志接口获取了失败构建的完整日志：
+   - x86_64：`multiarch/openeuler/x86-64/openeuler-docker-images` build #4993
+   - aarch64：`multiarch/openeuler/aarch64/openeuler-docker-images` build #5089
+2. 日志显示上一轮修复（`gcc-toolset-14-c++*` → `gcc-toolset-14-gcc-c++*`）已生效：builder 阶段 yum 安装成功（`gcc-toolset-14-gcc-c++-14.3.1-18.oe2403sp4` 已安装），构建推进到下一步。
+3. 随后在 `#8 [builder 3/4] RUN pip install ... cmake==3.28` 处出现第一条真实错误：
+   ```
+   ERROR: Could not find a version that satisfies the requirement cmake==3.28
+   ERROR: No matching distribution found for cmake==3.28
+   ```
+   两个架构日志一致。
+4. 经核对 PyPI `cmake` 版本，`3.28` / `3.28.0` 均不存在，3.28 系列仅有 `3.28.1`、`3.28.3`、`3.28.4`。上游 `microsoft/onnxruntime` v1.30.0 的 `cmake/CMakeLists.txt` 要求 `cmake_minimum_required(VERSION 3.28)`，因此选用 3.28 系列最新补丁 `3.28.4`，既满足最低版本要求，又保持原意（尽量贴近 3.28）。
+5. 已从 PyPI 验证 `cmake==3.28.4` 提供 `manylinux2014_x86_64` 与 `manylinux2014_aarch64` wheel，可覆盖 amd64 / arm64 两种构建架构。
 
 ## 潜在风险
-- 该改动仅涉及包名修正，`gcc-toolset-14-gcc*` 通配本身也能匹配 `gcc-toolset-14-gcc-c++`，改后显式安装同一 C++ 编译器包，不影响其它依赖；无功能性风险。
-- `yum install` 通过后，后续 `./build.sh` 编译阶段是否会暴露其他版本适配问题，需由 CI 重新构建验证；本次仅修复已由日志证实的第一处 error，未做推断性改动。
+无。改动仅改小版本号，且 3.28.4 满足 onnxruntime v1.30.0 的 CMake 最低版本约束；不影响其他文件或功能。
