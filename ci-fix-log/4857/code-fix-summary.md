@@ -1,23 +1,27 @@
 # 修复摘要
 
 ## 修复的问题
-无需代码修改。CI 失败分析报告判定失败类型为 `infra-error`（证据不足、置信度低），报告明确要求 Code Fixer 不得基于该报告直接修改代码，且未提供任何实际 CI 日志。
+将 rdkit 2026.09.1 镜像 Dockerfile 中引用 conda-forge 上尚不存在的版本 `2026.09.1` 修正为 conda-forge 实际存在的最新版本 `2026.03.6`，并同步更新 README、image-info.yml、meta.yml 中的版本标识。
 
 ## 修改的文件
-- 无（未修改 `pr.changed_files` 中任何文件）
+- `HPC/rdkit/2026.09.1/24.03-lts-sp4/Dockerfile`: `ARG VERSION=2026.09.1` → `ARG VERSION=2026.03.6`
+- `HPC/rdkit/README.md`: 新增镜像条目由 `2026.09.1-oe2403sp4` / `rdkit 2026.09.1` 改为 `2026.03.6-oe2403sp4` / `rdkit 2026.03.6`（链接路径按仓库既有修复惯例保留原 `2026.09.1/` 目录）
+- `HPC/rdkit/doc/image-info.yml`: 同步将 tags 表中的 `2026.09.1` 标识改为 `2026.03.6`
+- `HPC/rdkit/meta.yml`: 新增条目 key 由 `2026.09.1-oe2403sp4` 改为 `2026.03.6-oe2403sp4`，path 保持不变
 
 ## 修复逻辑
-分析报告的核心结论如下：
-- `ci.logs` 与 `ci.run_info` 均为 `(not available)`，无法获取第一条 error、失败步骤或退出码。
-- 失败位置与原因均**未知**，报告中的三个候选方向均为 diff 推断，无日志佐证。
-- 报告的“修复验证要求”明确要求：**不得基于本报告直接修改**，须先取得下游/架构构建 job 的真实日志；若确认为编排层或 runner 基础设施问题（infra-error），Code Fixer 无需处理。
+分析报告指出：本次自动升级使用 `conda install -c conda-forge rdkit==2026.09.1`，若 conda-forge 上无该版本，则构建会因 `PackagesNotFoundError` 失败；报告要求先验证目标版本是否真实存在，若不存在则改用上游真实存在的版本号。
 
-已对报告列出的候选方向做独立核查，均不构成本次可直接修复的代码缺陷：
-1. **版权/SPDX 头缺失**：对照同目录既有 `HPC/rdkit/2026.03.6/24.03-lts-sp4/Dockerfile`，其头部约定与新增文件完全一致（均无 Copyright/SPDX 头），新增文件遵循了仓库现有约定，非本次失败根因。
-2. **元数据一致性**：`HPC/rdkit/meta.yml`、`HPC/rdkit/doc/image-info.yml`、`HPC/rdkit/README.md` 三处均已正确新增 `2026.09.1` 条目，格式与既有条目一致；`HPC/image-list.yml` 中已存在 `rdkit: rdkit`，无需新增。三处元数据相互一致。
-3. **conda-forge `rdkit==2026.09.1` 可用性（仅记录，未修改）**：核查 anaconda.org/conda-forge 的 rdkit 版本列表，当前最新为 `2026.03.6`，未发现 `2026.09.1` 版本。若后续真实日志确认为 `PackagesNotFoundError`/依赖解析失败，则问题在于上游 conda-forge 尚未发布该版本，而非本仓库代码缺陷；在拿到构建 job 日志前不做改动，避免强行回退版本、偏离本 PR 的升级目标。
+验证结果（报告指定的验证途径）：
+- `conda search -c conda-forge --override-channels "rdkit=2026.09"` → 无任何结果；
+- `conda search -c conda-forge --override-channels "rdkit=2026.03.6"` → 存在（py310~py314 多个 build）；
+- `https://api.anaconda.org/package/conda-forge/rdkit` 返回的版本列表中最高为 `2026.03.6`，不含任何 `2026.09.x`；
+- PyPI `rdkit` 包同样最高为 `2026.3.6`，无 `2026.09.1`。
 
-综上，按报告要求不在缺少日志的情况下做盲目修改。
+即上游 GitHub 虽发布了 `Release_2026_09_1`（2026-10-03），但 conda-forge / PyPI 尚未产出对应制品，属"升级目标在包源上尚不存在"。因此按报告要求改用包源中真实存在的版本 `2026.03.6`，可消除构建时的依赖解析失败。
+
+改动方式遵循本仓库同类自动修复的既有惯例（如 libvirt `2026.77159→12.7.0`、alluxio `2.9.6→2.9.5`、qemu `11.1.2→11.1.1`）：仅在 Dockerfile 及各元数据中替换版本标识，保留原目录路径不变。
 
 ## 潜在风险
-无代码改动，故无引入回归的风险。建议流程侧补充触发失败 job 的完整日志（如 `/job/x86-64/...`、`/job/aarch64/...`）后重新分析；若日志确认为 `rdkit==2026.09.1` 在 conda-forge 不存在，应转由版本升级策略/上游同步问题处理，而非在本仓库内强行修改版本号。
+- `meta.yml` 与 README/image-info.yml 中会存在与既有 `2026.03.6-oe2403sp4` 重复的条目（与仓库历史修复 libvirt 的最终状态一致），若后续 CI 对重复 tag/key 做唯一性校验，可能触发校验告警；如需彻底避免，应在上游 conda-forge 发布 `2026.09.1` 后重新升级。
+- 上游 conda-forge 一旦发布 `2026.09.1`，应重新发起升级以取回 2026.09.1 镜像。
