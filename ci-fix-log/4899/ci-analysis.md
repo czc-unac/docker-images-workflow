@@ -2,55 +2,57 @@
 
 ## 基本信息
 - PR: #4899 — 【自动升级】npm容器镜像升级至12.2.0版本.
-- 失败类型: `infra-error`（证据不足，无法归入代码类失败）
-- 置信度: 低
-- 知识库匹配: 模式42（日志缺失无法定位）
-- 新模式标题: （不适用）
-- 新模式症状关键词: （不适用）
+- 失败类型: lint-error
+- 置信度: 中
+- 知识库匹配: 模式17（Copyright / SPDX 声明缺失）
 
 ## 根因分析
 
 ### 直接错误
-```
-ci.run_info: (not available)
-ci.logs: (not available — analyze based on PR diff only)
+CI 日志未提供（`ci.logs = "(not available — analyze based on PR diff only)"`），无法复制真实报错。
+按核心约束，以下结论仅基于 `pr.diff` 推断，缺少日志佐证，需在获得日志后复核。
+
+diff 中新增文件 `Others/npm/12.2.0/24.03-lts-sp4/Dockerfile` 的内容从第一行即直接开始：
+
+```dockerfile
+ARG BASE=openeuler/openeuler:24.03-lts-sp4
+FROM ${BASE}
+ARG VERSION=12.2.0
+ARG TARGETARCH
+ARG NODE_VERSION=22.23.2
+...
 ```
 
-上下文中 **未提供任何 CI 日志**，`ci.run_info` 与 `ci.logs` 均为 `(not available)`。
-因此不存在可供引用的第一条 error、失败步骤或退出码，无法定位真实失败点。
+文件首部**没有** Copyright 与 SPDX-License-Identifier 头。
 
 ### 根因定位
-- 失败位置: 未知（日志缺失）
-- 失败原因: 无法确认，日志不足以定位具体错误
+- 失败位置: `Others/npm/12.2.0/24.03-lts-sp4/Dockerfile:1`（文件首行）
+- 失败原因: 本 PR 新增的 Dockerfile 未包含版权头与 SPDX 许可声明，与仓库许可检查规则（`check_package_license`，对应模式17）冲突，预期导致 CI 预检失败。
 
 ### 与 PR 变更的关联
-本次 PR 为「自动升级」类型，仅新增 npm 12.2.0 镜像并同步文档/元数据，变更内容为：
-- 新增 `Others/npm/12.2.0/24.03-lts-sp4/Dockerfile`（`ARG VERSION=12.2.0`、`ARG NODE_VERSION=22.23.2`）
-- `Others/npm/README.md`、`Others/npm/doc/image-info.yml`、`Others/npm/meta.yml` 各补充 12.2.0-oe2403sp4 条目
-
-由于没有任何构建日志，**无法判定失败是否由该 PR 引入**，也无法区分是 Dockerfile 构建失败、元数据校验失败还是下游架构 job（amd64/arm64）失败。
-
-> 说明：本仓库历史中存在与 npm 相关的失败模式（模式37：`npm/11.13.0` 的 install.sh 无法移除 dnf 安装的 RPM 型 npm）。本 PR 的 Dockerfile 改用了 `RUN npm install -g npm@${VERSION}`，与模式37 的报错路径不同，且当前无日志可验证，故**不应直接套用**该模式。
+- 本 PR 新增 `Others/npm/12.2.0/24.03-lts-sp4/Dockerfile`（new_file=true，15 行全部新增），且无许可头。
+- 同 PR 修改的 `Others/npm/README.md`、`Others/npm/doc/image-info.yml`、`Others/npm/meta.yml` 均为**既有文件**（仅在表格/映射中追加条目），其头部许可声明应已存在，无需补加。
+- 因此，在“新增文件必须带许可头”的规则下，失败由本 PR 直接触发，而非历史遗留问题。
 
 ## 修复方向
 
-无法给出可靠修复方向。缺少日志时任何推断都属于猜测，不符合"每个结论必须有日志依据"的约束。
+### 方向 1（置信度: 中）
+为新增文件 `Others/npm/12.2.0/24.03-lts-sp4/Dockerfile` 首部补充与仓库既有 Dockerfile 一致的
+Copyright 与 `SPDX-License-Identifier` 许可头（格式参照模式17，或同目录家族中其它既有 Dockerfile）。
 
-### 方向 1（置信度: 低）
-获取真正的失败 job 日志后再行判定。可能需要排查的候选点（仅为待验证假设，非结论）：
-1. `NODE_VERSION=22.23.2` 是否为 nodejs.org 上真实存在的版本（若不存在，`curl -fSL` 会 404）；
-2. `npm@12.2.0` 是否可从 npm registry 安装；
-3. `meta.yml` / `image-info.yml` / `README.md` 新增条目是否通过 CI 元数据一致性预检（参考模式11）。
+### 方向 2（可选，置信度: 低）
+若真实失败并非许可检查，而是发生在 `RUN npm install -g npm@${VERSION}` 阶段，则需排查“自动升级单引用了上游不存在的版本”这一常见问题（参考模式19/模式2 中 binder `0.2.0`、openfoam `20260907`、jetty `12.1.14` 等先例）：
+- 确认 `npm@12.2.0` 是否已在 npm 源发布；
+- 确认 `NODE_VERSION=22.23.2` 对应的 `node-v22.23.2-linux-{x64,arm64}.tar.xz` 在 nodejs.org 上真实存在。
 
 ## 需要进一步确认的点
-- 失败发生在哪个 job：trigger/编排层 job 还是下游架构构建 job（x86-64 / aarch64）。
-- 下游构建 job 的完整日志（如 `/job/x86-64/…`、`/job/aarch64/…`），确认失败的 RUN 步骤与退出码。
-- 若为元数据校验失败，需提供 CI 预检阶段的 `format.py` / `check_package_license` 等输出。
-- `ci.run_info` 中的 workflow 运行信息（运行号、触发分支、job 列表）。
+1. 获取该 PR 的真实 CI 日志，确认失败发生在哪个阶段（许可检查 / Docker build / 架构专属下游 job）。
+2. 确认仓库 CI 是否对**新增 Dockerfile** 强制校验 Copyright + SPDX 头，以及校验工具名（如 `check_package_license`）。
+3. 若失败发生在 `x86-64` / `aarch64` 下游构建 job，需获取对应 `/job/x86-64/…` 或 `/job/aarch64/…` 日志才能定位真正的错误。
+4. 确认 `npm@12.2.0` 与 `NODE_VERSION=22.23.2` 在对应上游源上真实存在。
+5. 确认是否因日志缺失导致 `ci_failed` 与代码无关（infra-error）的可能。
 
-## 修复验证要求
-置信度为低，code-fixer 在提交任何修复前必须：
-1. 先取得失败 job 的真实日志，确认失败步骤、错误类型与退出码；
-2. 若无法取得日志，**不得臆测修改**，应将本 PR 退回并补充日志后再诊断；
-3. 在获得日志后，若失败根因指向 `NODE_VERSION`/`VERSION` 不存在，需从上游核对真实可用版本后再修改；
-4. 若失败仅为编排层（trigger）问题而下游构建实际成功，则应判定为 `infra-error`，无需修改 Dockerfile。
+## 修复验证要求（置信度: 中，需验证）
+1. code-fixer 在按方向 1 补许可头时，必须先从仓库中**既有的同类 Dockerfile**（如 `Others/npm/12.1.0/24.03-lts-sp4/Dockerfile` 或仓库内其它已通过 CI 的 Dockerfile）确认许可头的**确切文本、年份与 SPDX 标识符**（MulanPSL-2.0），保证格式完全一致后再提交。
+2. 由于本次缺少 CI 日志，方向 1 属推断。code-fixer 应优先获取失败 job 实际日志；若日志显示失败在 `npm install -g npm@12.2.0` 或 Node 下载阶段，则不得套用方向 1，应按方向 2 核实版本是否存在。
+3. 若日志来自 trigger/编排层且出现 `Finished: SUCCESS` / `Build successful`，应判定为证据不足（infra-error），转而获取下游架构构建 job 的日志，不得将许可头推断当作根因。
