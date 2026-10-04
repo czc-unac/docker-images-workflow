@@ -2,41 +2,63 @@
 
 ## 基本信息
 - PR: #4907 — 【自动升级】lammps容器镜像升级至2026.09.30版本.
-- 失败类型: build-error
-- 置信度: 中
-- 知识库匹配: 模式42（日志缺失无法定位）
-- 新模式标题: (不适用，已匹配已有模式)
+- 失败类型: build-error（疑似；证据不足）
+- 置信度: 低
+- 知识库匹配: 模式42（日志缺失无法定位）；关联 模式02（下载 URL / 软件包版本不存在）、模式17（Copyright / SPDX 声明缺失）
+- 新模式标题: (不适用)
 - 新模式症状关键词: (不适用)
 
 ## 根因分析
 
 ### 直接错误
-上下文 `ci.logs` 为 `(not available — analyze based on PR diff only)`，无任何可用失败日志。
-无法从日志中提取错误信息。以下分析完全基于 `pr.diff` 与 `historical_patterns` 推断。
+`ci.logs` 为 `(not available — analyze based on PR diff only)`，本次未提供任何失败 job 日志，
+无法复制到真实的报错信息。所有判断只能基于 `pr.diff` 与 `historical_patterns` 推断。
 
 ### 根因定位
-- 失败位置: `HPC/lammps/2026.09.30/24.03-lts-sp4/Dockerfile`（`RUN wget https://github.com/lammps/lammps/archive/refs/tags/stable_${VERSION}.tar.gz` 步骤，`ARG VERSION=2026.09.30`）
-- 失败原因: 本 PR 为 LAMMPS 自动升级单，`VERSION=2026.09.30` 对应的上游 Git tag `stable_2026.09.30` 很可能不存在（LAMMPS 稳定版 tag 采用 `stable_<DD><Mon><YYYY>` 形式，如 `stable_22Jul2025`、`stable_29Aug2024`），wget 下载归档源码返回 404，导致 Docker 构建在下载步骤失败。
+- 失败位置: 未知（日志缺失）→ 疑点集中在新增的 `HPC/lammps/2026.09.30/24.03-lts-sp4/Dockerfile`
+- 失败原因（待验证）: 新增 Dockerfile 使用 `ARG VERSION=2026.09.30` 构造下载 URL
+  `https://github.com/lammps/lammps/archive/refs/tags/stable_${VERSION}.tar.gz`，
+  即请求上游 tag `stable_2026.09.30`。LAMMPS 上游的 stable tag 命名为
+  `stable_<DDMonYYYY>` 形式（如 README 中已收录的 `22Jul2025`、`29Aug2024`），
+  并不存在 `stable_2026.09.30` 这种 `YYYY.MM.DD` 形式，`wget` 极可能返回 404，导致构建失败。
 
 ### 与 PR 变更的关联
-本 PR 新增了 `HPC/lammps/2026.09.30/24.03-lts-sp4/Dockerfile`，并更新 `README.md`、`doc/image-info.yml`、`meta.yml`。其中 Dockerfile 的下载 URL 直接依赖 `VERSION=2026.09.30` 构造 `stable_2026.09.30.tar.gz`。若该版本号并非上游真实存在的 tag，则本次 PR 的改动即为失败触发源，与既有代码无关。
+本 PR 为自动升级，新增版本目录 `2026.09.30`（未在既有版本列表中出现），
+新增 Dockerfile 中的 `VERSION` 与下载 URL 完全来自该升级动作。
+知识库 `模式42` 已记录**同一路径、同一版本**的历史案例：
+> PR #4861: `HPC/lammps/2026.09.30/24.03-lts-sp4/Dockerfile` — LAMMPS 自动升级 PR 使用了
+> 不存在的上游 tag `stable_2026.09.30`，导致 Dockerfile 构建失败。
+
+本次 PR #4907 与 #4861 的路径、版本、标题高度一致，属于同一问题的再次提交，故该推断有较强历史依据，
+但因当前缺少实际 `ci.logs`，仍判定为**证据不足**，不能直接确认为唯一根因。
+
+其他需注意但未证实的疑点（同样只能靠 diff 推断）：
+- 新增 `Dockerfile` 无 Copyright / SPDX-License-Identifier 头（`模式17` 记录的 `check_package_license` 检查项）。
+- `meta.yml` 仅新增镜像条目，未同步确认场景级 `image-list.yml` 是否需要补充（`模式11` 相关）。
 
 ## 修复方向
 
-### 方向 1（置信度: 中）
-核对 LAMMPS 上游仓库（github.com/lammps/lammps）实际发布的 tag，将 `VERSION`（及对应目录名、`meta.yml`、`README.md`、`image-info.yml` 条目）修正为上游真实存在的稳定 tag（形如 `stable_<DD><Mon><YYYY>`）。知识库中 **PR #4861 针对完全相同的文件 `HPC/lammps/2026.09.30/24.03-lts-sp4/Dockerfile` 已记录该结论**：自动升级采用了不存在的上游 tag `stable_2026.09.30`。
+### 方向 1（置信度: 低）
+先核实 LAMMPS 上游实际存在的 release tag。若 `stable_2026.09.30` 确实不存在，则应把版本号/下载 URL
+修正为上游真实存在的 tag（LAMMPS 采用 `stable_DDMonYYYY` 命名，如 `stable_22Jul2025` 等），
+并同步更新 `Dockerfile`、`README.md`、`doc/image-info.yml`、`meta.yml` 中的版本文案与路径。
 
-### 方向 2（可选）
-若上游 tag 确实存在而失败发生在下载之后的 `make mpi` 编译阶段，则需另行获取构建期编译日志确认（当前证据不足，无法判定）。
+### 方向 2（置信度: 低）
+若上游 tag 实际存在（版本命名方案已变更），则失败可能出在构建阶段：`make mpi`、MPI 选择
+（同时安装 `openmpi-devel` 与 `mpich-devel`）、或缺少构建依赖等。需以下游构建日志为准再定位。
 
 ## 需要进一步确认的点
-1. **必须获取真正失败 job 的 CI 日志**：当前上下文的 `ci.logs` 完全缺失，无法验证错误是 wget 404、解压失败还是 `make mpi` 编译失败。需获取对应架构构建 job（如 `/job/x86-64/…`、`/job/aarch64/…`）的日志。
-2. 确认 `https://github.com/lammps/lammps/archive/refs/tags/stable_2026.09.30.tar.gz` 是否返回 404（即上游是否存在 `stable_2026.09.30` tag）。
-3. 确认自动升级工具生成 `2026.09.30` 的来源，以及 LAMMPS 在 `image-info.yml` 中 `version_prefix: stable_` 下的正确版本命名规则。
-4. 确认 `meta.yml` / `README.md` / `doc/image-info.yml` 中新增条目是否与 Dockerfile 目录一致（避免元数据与路径不匹配的二次失败）。
+1. **必须获取下游架构构建 job 的日志**：`/job/x86-64/…` 与 `/job/aarch64/…`（当前仅拿到 trigger/编排层信息，
+   `ci.logs` 完全缺失，无法看到真正报错的第一现场）。
+2. 拉取上游 LAMMPS 仓库的 tag 列表，确认是否存在 `stable_2026.09.30`；若不存在，确认自动升级工具
+   为何生成了该版本号（版本解析规则 `version_scheme: RPM` 是否被误用）。
+3. 确认 CI 是否对新增文件执行 `check_package_license`（Copyright / SPDX 头）检查。
+4. 确认 `HPC` 场景 / `lammps` 目录是否要求同步维护 `image-list.yml` 条目。
 
 ## 修复验证要求
-- 由于当前日志缺失、置信度为"中"，code-fixer **不得直接假设**根因为 tag 404。
-- code-fixer 在修改前，**必须**从 LAMMPS 上游仓库（以 `ARG VERSION` 对应版本为准）确认实际可用的 tag 名称，例如访问 `https://github.com/lammps/lammps/tags` 或校验 `https://github.com/lammps/lammps/archive/refs/tags/stable_<实际版本>.tar.gz` 返回 200。
-- 修改时需同步更新 `HPC/lammps/2026.09.30/` 目录名、`meta.yml`、`README.md`、`doc/image-info.yml` 中的版本引用，保持四处一致。
-- 若无法获取下游构建日志且无法确认上游 tag，应将本失败标注为证据不足，暂不改动。
+当前置信度为「低」，且修复方向 1 涉及版本号与上游 tag 的匹配关系，code-fixer 在提交前必须执行验证：
+- 从上游 `github.com/lammps/lammps` 的 release/tag 列表确认目标版本的真实 tag 名称，
+  验证 `stable_<VERSION>` 可被 `https://github.com/lammps/lammps/archive/refs/tags/stable_${VERSION}.tar.gz` 下载（HTTP 200），
+  再据此修正 `VERSION` 及所有引用版本的元数据文件。
+- 不得在未验证上游 tag 存在性的情况下直接套用修复方向。
+- 若无法获取下游架构构建日志，则本 PR 不应被判定为已修复，需保留「证据不足」标注。
