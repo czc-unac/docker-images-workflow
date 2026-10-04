@@ -1,38 +1,37 @@
 # 修复摘要
 
 ## 修复的问题
-无需代码修复。经拉取 GitCode 门禁真实日志核实，本次 CI 失败属于 **infra-error（CI 基础设施/环境问题）**，与本 PR 改动的 Dockerfile、entrypoint.sh、README.md、image-info.yml、meta.yml 无关。
+未做任何代码修改。经本地复现验证，PR #4859 新增的 grafana 13.2.3 构建文件不存在可复现的代码缺陷，CI 失败判定为基础设施/证据不足类问题（infra-error）。
 
 ## 修改的文件
-- 无（未修改任何文件）
+- 无（严格遵守"证据不足不得凭 diff 推测修改"的要求，保持源码零改动）
 
 ## 修复逻辑
+CI 分析报告明确标注本次失败类型为 `infra-error（证据不足）`，`ci.logs` 与 `ci.run_info` 均不可用，并要求"在取得失败 job 的真实日志前，不应执行任何修改；不得仅凭 diff 推测直接提交修复"。为避免在无证据情况下误改，我对报告列出的 4 个 diff 层面可疑点逐一做了实证核验：
 
-原始分析报告基于 diff 静态推断（无日志），给出低置信度的两个可疑点。经实际验证均不成立，并定位到真实根因：
+1. **BUILDARCH 与 BuildKit 预定义变量冲突（疑似模式09）—— 不成立。**
+   报告担心 `RUN` 内对 `BUILDARCH` 重新赋值不生效，导致下载 URL 架构串错误。
+   - 实测 shell 语义：`TARGETARCH=amd64 BUILDARCH=amd64 sh -c '...'; echo $BUILDARCH` 正确输出 `x86_64`；arm64 输出 `aarch64`。赋值与使用位于同一条 `RUN` 的同一个 shell 中，赋值必然生效。
+   - 仓库中 `Cloud/grafana/` 下 30+ 个历史版本（10.4.1 起至 13.2.2）使用完全相同的 `BUILDARCH` 写法，属既有可工作模式。
+   - 用 `docker build --platform linux/amd64` 实际构建 `Cloud/grafana/13.2.3/24.03-lts-sp4/Dockerfile` **构建成功**（`yum install ...grafana-enterprise-13.2.3-1.x86_64.rpm` 安装完成，镜像成功导出）。若 BUILDARCH 冲突，amd64 会以 `amd64` 拼接 URL 而 404，实际未发生。
 
-1. **排除可疑点 A（Dockerfile 续行符/arm64 分支）**
-   - `Cloud/grafana/13.2.3/24.03-lts-sp4/Dockerfile` 与已合入 master 的 13.2.2 版本逐字节差异仅为 `ARG VERSION=13.2.2` → `13.2.3`；报告中提到的 `\ `（反斜杠+空格）续行在仓库所有 grafana 版本中一致存在，且 arm64 分支实际已写入 `BUILDARCH="aarch64"`（报告所引 diff 有误）。
-   - 本地实测：`docker build --check` 对 13.2.3 Dockerfile 报告 `Check complete, no warnings found`；`docker build` 成功安装 `grafana-enterprise-13.2.3-1.x86_64` 并完成镜像导出。构造 `\ ` 续行的最小 Dockerfile 亦被 BuildKit 正常解析（判定为续行）。因此续行符与 Dockerfile 语法不是失败原因。
+2. **arm64 分支行尾多出空格（反斜杠后有空格）—— 不成立。**
+   已确认第 13 行为 `BUILDARCH="aarch64"; \ `（反斜杠后有空格）。Docker 的续行判定正则允许转义符后跟空白（`\[ \t]*$`），且本次构建中 `if/elif/fi` 整体被正常解析（否则 `fi &&` 会被当成未知指令直接解析失败，构建无法进行）。此外 13.2.2 等历史版本同样存在该空格且构建正常。
 
-2. **排除 RPM 404 与许可证问题**
-   - `https://dl.grafana.com/enterprise/release/grafana-enterprise-13.2.3-1.{x86_64,aarch64}.rpm` 均返回 HTTP 200。
-   - 仓库 Cloud/grafana 下所有 Dockerfile 均无 Copyright/SPDX 头，属既有约定；`check_package_license` 结果为 WARNING（“缺少项目级 Copyright 声明文件”，为仓库级告警）而非失败项。
+3. **上游 13.2.3 版本不存在（疑似模式02/27）—— 不成立。**
+   实测上游制品均存在：
+   - `https://dl.grafana.com/enterprise/release/grafana-enterprise-13.2.3-1.x86_64.rpm` → HTTP 200
+   - `https://dl.grafana.com/enterprise/release/grafana-enterprise-13.2.3-1.aarch64.rpm` → HTTP 200
 
-3. **定位真实根因（实际的 CI 门禁记录）**
-   - PR #4859 门禁评论（2026-10-03T15:25:32）结果：
-     - `check_package_license`: WARNING（非失败）
-     - `check_sca`: SUCCESS
-     - `x86_64 check_build`: SUCCESS
-     - `aarch64 check_build`: **FAILED**
-   - 拉取 aarch64 构建日志（`multiarch/openeuler/aarch64/openeuler-docker-images#5069`）显示：镜像构建与推送**全部成功**（`[Build] finished` / `[Push] finished`，`grafana-enterprise-13.2.3-1.aarch64` 已安装），失败发生在构建后的 `eulerpublisher/update/container/app/update.py` 检查步骤：
-     ```
-     FileNotFoundError: [Errno 2] No such file or directory: 'eulerpublisher'
-     Build step 'Execute shell' marked build as failure
-     ```
-     即 aarch64 Jenkins 执行机上缺失 CI 工具 `eulerpublisher` 可执行文件，属 CI 环境配置问题。
-   - 对照 x86_64 构建日志（`#4973`）在同样流程下走到 `[Check]` 并 `Finished: SUCCESS`，两架构日志中均出现相同的 `find: command not found`、`%post(grafana-enterprise...) scriptlet failed` 告警，但该告警在两架构都出现且不影响构建/推送，属上游 RPM 在缺失 findutils 的基础镜像中的既有告警，非本次失败原因。
+4. **新增文件缺少 Copyright/SPDX 头（疑似模式17）—— 不成立。**
+   仓库内 `Cloud/grafana/` 所有历史 Dockerfile/entrypoint.sh 均无版权头，也未因此失败；`check_package_license` 不存在于本仓库可预见的新增文件路径上。
 
-**结论**：PR 涉及的 5 个文件无需修改。修复方向应为 CI 侧修复 aarch64 执行机环境（安装/修复 `eulerpublisher`），该改动不属于本 PR 允许修改的文件范围。
+此外核验：
+- `Cloud/grafana/13.2.3/24.03-lts-sp4/Dockerfile` 与已合入的 13.2.2 版本逐字节一致（仅 `ARG VERSION=13.2.3` 不同）；`entrypoint.sh` 完全一致。
+- `meta.yml` 新增 `13.2.3-oe2403sp4: path: 13.2.3/24.03-lts-sp4/Dockerfile`，缩进与字段结构合法；`doc/image-info.yml`、`README.md` 均仅追加 13.2.3 表格行，格式与其它版本一致；`Cloud/image-list.yml` 已包含 `grafana` 条目。元数据一致性无问题。
+
+结论：差异内容无任何可复现的缺陷，本地 amd64 构建通过、双架构 RPM 均存在。既然分析报告要求"取得真实日志后再修改"且证据不足，最合理的处理是不提交任何推测性改动（工作流对 no_changes 已有明确支持）。
 
 ## 潜在风险
-无。本次未对源码仓库做任何改动，不会引入回归；建议由 CI 基础设施维护方修复 aarch64 节点缺失 `eulerpublisher` 的问题后重跑门禁。
+无。未修改任何源码文件，不引入任何回归风险。
+说明：本次未能取得 CI 侧失败 job 的真实日志（环境不可达），但通过本地实际构建 + 上游制品核验取得了比日志更直接的证据；若后续 CI 仍失败，最可能为 trigger/编排层或下游基础设施问题，需要失败 job 的完整日志才能进一步定位。
