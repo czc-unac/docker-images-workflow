@@ -1,38 +1,41 @@
 # 修复摘要
 
 ## 修复的问题
-无需修改代码。经核查 PR #4898 的真实 CI 结果与失败 job 日志，本次 CI 失败属基础设施/网络限流问题（x86-64 构建 job 在第一步通过 `curl` 下载 CI 自带脚本 `build.sh` 时被限流返回 HTTP 429），与本次 PR 的 Dockerfile 变更无关；aarch64 同版本构建已成功，重新触发构建即可。
+无需代码修改。本次 CI 失败为 `infra-error`（基础设施错误）：x86_64 构建 job 在下载构建脚本 `build.sh` 时被 CI 侧限流返回 HTTP 429，导致 job 在真正执行 Docker 构建之前即失败，与 PR #4898 的代码变更无关。
 
 ## 修改的文件
-- 无（未修改任何文件）
+- 无（未修改任何源文件）
 
 ## 修复逻辑
-1. **分析报告状态**：给定的 CI 分析报告将失败类型标为 `build-error`（证据不足，置信度低），因上下文未携带 `ci.logs`，报告仅能基于 `pr.diff` 给出可疑点假设（架构硬编码 / 内容错配 / license 头缺失），并未命中根因，且明确要求"不得直接依据 diff 假设提交修复"。
+经获取并核对本次 PR 的实际 CI 门禁结果与日志，确认失败原因如下：
 
-2. **获取真实 CI 信息**（通过 GitCode v5 API 读取 `openeuler/openeuler-docker-images` PR #4898 评论，未依赖猜测）：
-   - `check_package_license` → WARNING（缺少项目级 Copyright 声明文件，仅告警）
-   - `check_sca` → SUCCESS
-   - `x86_64` `check_build` → **FAILED**（job #5017）
-   - `aarch64` `check_build` → **SUCCESS**（job #5113）
+1. PR #4898 门禁结果（来自 openEuler CI bot 在 PR 上的评论）：
+   - `check_package_license`: WARNING（仓库缺少项目级 Copyright 声明文件）
+   - `check_sca`: SUCCESS
+   - `x86_64 / check_build`: **FAILED**
+   - `aarch64 / check_build`: SUCCESS
 
-3. **抓取 x86-64 失败 job #5017 完整控制台日志**（`https://log-ci.openeuler.openatom.cn/api/build/log?job=multiarch/openeuler/x86-64/openeuler-docker-images&build=5017`，全文 2490 字节，`hasMore=false`）。第一条也是唯一真实错误为：
+2. x86_64 失败 job（#5017）日志（`https://log-ci.openeuler.openatom.cn/api/build/log/download?job=multiarch/openeuler/x86-64/openeuler-docker-images&build=5017`）关键内容：
    ```
+   [****-docker-images] $ /bin/bash /tmp/jenkins11695670029568581100.sh
    curl: (22) The requested URL returned error: 429
    chmod: cannot access 'build.sh': No such file or directory
    /tmp/jenkins...sh: line 21: ./build.sh: No such file or directory
    Build step 'Execute shell' marked build as failure
    Finished: FAILURE
    ```
-   失败发生在 job 的第一步：CI 用 `curl` 下载其自身的构建脚本 `build.sh` 时被限流（HTTP 429），脚本缺失导致 job 立即失败，**根本没有进入 Docker 镜像构建阶段**。
+   即 x86_64 job 在第一步用 `curl` 拉取构建脚本 `build.sh` 时收到 HTTP 429（Too Many Requests / 限流），`build.sh` 未落地，后续 `./build.sh` 无法执行，job 在 **Docker 构建开始之前**即失败。
 
-4. **对照 aarch64 SUCCESS job #5113 日志**（全文 197265 字节，`hasMore=false`）：同一 Dockerfile 在 aarch64 上完成 `pblat-cluster` 编译、镜像导出与推送，最后提示 `File: .../seurat_test.sh does not exist, no test runs` 并 `Finished: SUCCESS`。这反向证明新增 Dockerfile 的内容在该架构上可正常构建。
+3. 作为对照，aarch64 job（#5113）日志显示：
+   - `build.sh` 正常下载成功（`100 1415 ... 100 1415`）；
+   - 成功执行镜像构建并推送 `openeulertest/seurat:5.6.0-oe2403sp4-aarch64`；
+   - 末尾 `Finished: SUCCESS`，且明确记录 `seurat_test.sh does not exist, no test runs`，说明门禁 `check_build` 仅做构建，不会运行 Seurat 内容校验。
 
-5. **结论**：本次 CI 失败是 x86-64 runner 下载 CI 脚本时的瞬时 HTTP 429 限流（可重试的 infra-error），并非 `HPC/seurat/5.6.0/24.03-lts-sp4/Dockerfile` 或元数据文件的问题。按最小化原则与 `infra-error` 处理约定，**本次不改动任何代码**。
+结论：失败仅发生在 x86_64 节点的 `build.sh` 下载阶段（429 限流），属于偶发的 CI/网络基础设施问题，具备明显的架构不对称性（aarch64 同代码成功），因此按分析报告判定为 `infra-error`，**不应强行修改 Dockerfile 或任何代码**。
 
-6. **关于报告中的可疑点**：
-   - 可疑点 A（架构硬编码）：`sed` 仅在 aarch64 目标上把 `MACHTYPE` 改为 `aarch64`，而 x86-64 job 未进入构建阶段，故不是本次失败原因；按"不扩展范围"不改动。
-   - 可疑点 B（内容为 pblat-cluster）：核对 git 历史，`HPC/seurat/5.5.0`、`5.5.1` 及该目录最初提交内容完全一致，属仓库既有历史遗留问题，非本 PR 引入，与本次失败无关。
-   - 可疑点 C（license 头缺失）：实际检查结果为 WARNING（`缺少项目级Copyright声明文件`），并非 FAILED；且 `HPC/` 下同类 `meta.yml`/Dockerfile 普遍无 SPDX 头，不构成本次门禁失败。
+补充说明（与本次失败无关的既有问题，不在本 PR 修复范围）：
+- `HPC/seurat/5.6.0/24.03-lts-sp4/Dockerfile` 的内容确实是 `pblat-cluster` 构建流程，与 `seurat`（R 语言单细胞分析工具）不符；但该内容自 `HPC/seurat` 首次提交（`4c11cbf90`）起即存在于 5.5.0/5.5.1 等所有历史版本中，属于**既有历史问题**，并非本 PR 引入，也不是本次 CI 失败的原因（参照 aarch64 已用同一内容构建成功）。
+- 该既有问题的修复涉及重写全部 seurat 版本内容，超出本 PR `changed_files` 允许的范围与“最小化修复”约束，故本次不改动。
 
 ## 潜在风险
-无（未修改任何代码）。补充说明：`HPC/seurat` 目录下 Dockerfile 内容与镜像名（seurat）不符的历史遗留问题、以及"缺少项目级 Copyright 声明文件"的告警仍然存在，建议维护者另行评估，但不属于本次 CI 失败（x86-64 HTTP 429 限流）的范畴，本次不触碰。
+无。本次未做任何代码修改。建议对 x86_64 job 触发重试（429 为限流类瞬态错误，重试即可通过）；如后续需要修正 seurat 镜像内容与命名不符的既有问题，应单独提 PR 并同步修正 5.5.0/5.5.1/5.6.0 各版本及元数据。
