@@ -2,53 +2,58 @@
 
 ## 基本信息
 - PR: #4916 — 【自动升级】pyrosetta容器镜像升级至3.15版本.
-- 失败类型: `infra-error`（证据不足，无法归类到代码相关类型）
+- 失败类型: infra-error（证据不足，无法归因到具体构建/测试阶段）
 - 置信度: 低
-- 知识库匹配: 模式42（日志缺失无法定位）
+- 知识库匹配: 模式42（日志缺失无法定位）/ 模式17（Copyright / SPDX 声明缺失，diff 推断的候选）
 - 新模式标题: (不适用)
 - 新模式症状关键词: (不适用)
 
 ## 根因分析
 
+### 前置检查（日志与状态一致性）
+`ci.logs` 字段值为 `(not available — analyze based on PR diff only)`，`ci.run_info` 为 `(not available)`。
+本次**未提供任何 CI 日志**，因此不存在 `Finished: SUCCESS` / `Build successful` 与失败状态冲突的问题，但也**没有任何可用于定位根因的日志证据**。
+
 ### 直接错误
-上下文 `ci.logs` 字段明确标注为：
-
-```
-(not available — analyze based on PR diff only)
-```
-
-即本次分析**没有任何 CI 日志可供引用**。日志末尾无 `Finished: SUCCESS` / `Build successful` 等成功标志，也无任何 error、traceback、编译器报错、下载报错或校验报错。因此不存在可引用的"直接错误"。
+（无。`ci.logs` 未提供，无法复制关键错误信息。）
 
 ### 根因定位
-- 失败位置: 未知（日志缺失，无法确定失败发生在哪个 Dockerfile 行、哪个架构 job）
-- 失败原因: 无法确认。缺少 `ci.logs`，无法判断失败属于编译失败、依赖下载失败、构建脚本错误还是 CI 基础设施问题。
+- 失败位置: 未知（日志缺失，无法确定失败的构建阶段或架构专属 job）
+- 失败原因: 无法确认。没有日志，不能判断失败发生在 Dockerfile lint、镜像构建、还是下游架构构建 job。
 
 ### 与 PR 变更的关联
-本 PR 为自动升级类变更，新增 `HPC/pyrosetta/3.15/24.03-lts-sp4/Dockerfile`，并同步更新 `README.md`、`doc/image-info.yml`、`meta.yml`。由于无日志，**不能确认失败是否由这些改动直接触发**，仅能从 diff 静态识别出以下潜在风险点（均未经日志证实，不得作为根因结论）：
+本 PR 为 pyrosetta 自动升级单，改动内容为：
+1. 新增 `HPC/pyrosetta/3.15/24.03-lts-sp4/Dockerfile`（42 行，`ARG VERSION=v3.15-dev62280`）。
+2. `HPC/pyrosetta/README.md`、`HPC/pyrosetta/doc/image-info.yml`、`HPC/pyrosetta/meta.yml` 增加 `3.15-oe2403sp4` 条目。
 
-1. **上游引用存在性风险**：`ARG VERSION=v3.15-dev62280` 随后用于 `git clone --branch ${VERSION} ... https://github.com/RosettaCommons/rosetta.git`。若上游 `RosettaCommons/rosetta` 不存在该分支/标签 `v3.15-dev62280`，`git clone` 会以 `Remote branch ... not found` 失败（参见模式22、模式18/28 的同类症状）。此为 diff 层面可观察的高风险点，但**本报告无法确认**。
-2. **许可证头缺失风险**：新增的 `Dockerfile`、以及对 `README.md`/`image-info.yml`/`meta.yml` 的变更，均未见 `Copyright` / `SPDX-License-Identifier` 头。若 CI 含 `check_package_license` 预检，可能触发模式17，但同样**未经日志证实**。
-3. **构建脚本兼容性风险**：`python3 build.py ... --binder-llvm-options "-isystem /usr/include/c++/12 ..."` 硬编码 GCC 12 头文件路径，`multiarch` 由 `gcc -dumpmachine` 动态生成；若基础镜像实际 GCC 版本路径不同，可能引发编译问题。无日志无法判断。
-4. `Dockerfile` 末尾 `\ No newline at end of file`：仅为文件未以换行结尾，通常无功能影响。
+**基于 diff 的候选疑点（均无法用日志确认，仅作待验证方向）**：
 
-以上第 1 点为本 PR diff 中最值得优先排查的方向，但在取得日志前**不构成根因判定**。
+- **候选 A（lint-error，对应模式17）**：新增的 `Dockerfile` 首行直接为 `ARG BASE=...`，**未见**本项目规范要求的 Copyright + SPDX-License-Identifier 版权头。按模式17，新增文件缺少版权声明会触发 CI `check_package_license` 检查失败。这是纯 diff 可观察到的、最可能的 CI 失败点。但本 PR 中 `meta.yml` 也是被修改而非新增，`README.md`/`image-info.yml` 亦为追加行，是否要求补头需以仓库实际规范为准。
+- **候选 B（build-error）**：Dockerfile 使用 `git clone --depth 1 --branch ${VERSION}`，`VERSION=v3.15-dev62280` 为开发快照 tag，若该 tag 在上游 `RosettaCommons/rosetta` 不存在或不可获取，会构建失败（参考模式02/模式19 的“版本不存在”类问题）。此点无法从 diff 确认。
+- **候选 C（build-error）**：`python3 build.py` 构建 PyRosetta 通常依赖 `scons` 等构建工具，而 `dnf install` 列表为 `git gcc gcc-c++ make cmake ninja-build clang llvm python3 python3-devel python3-pip python3-setuptools xz zlib-devel wget which findutils`，**未包含 scons**，存在缺构建依赖（模式10）的风险。同样无法用日志确认。
+- **候选 D（meta 一致性）**：`meta.yml` 新增 `3.15-oe2403sp4`，需确认其与 `image-list.yml` 及目录结构一致性校验通过（模式11）。
+
+以上候选均**不能作为结论**，缺乏日志支撑，不能据此认定根因。
 
 ## 修复方向
 
 ### 方向 1（置信度: 低）
-先获取真实失败日志再进行修复定位；在缺少日志的情况下，不应对 Dockerfile 或元数据文件做任何盲改。若后续日志确认 `git clone --branch v3.15-dev62280` 报 `Remote branch not found`，则应核对上游 `RosettaCommons/rosetta` 上真实存在的分支/标签名并修正 `ARG VERSION`。
+不要在本 PR 上做代码修改。先获取真实的 CI 失败 job 日志，再定位根因。若失败发生在 trigger/编排层之外的架构专属 job（x86-64 / aarch64），需拉取对应下游构建日志。
 
-### 方向 2（可选，置信度: 低）
-若日志确认失败发生在 CI 预检（license/schema 校验）阶段，则按项目规范补齐版权头或元数据格式（对应模式11/模式17），而不是修改构建逻辑。
+### 方向 2（置信度: 低）
+若后续日志确认失败在 `check_package_license`（`Copyright` / `SPDX` 关键字），则按模式17为新增的 `Dockerfile` 补充版权头；否则忽略此方向。
 
 ## 需要进一步确认的点
-由于日志完全缺失，以下内容必须补充后才能给出确定结论：
+1. 获取失败 job 的完整日志（含 `ci.run_info` 的 job 名与阶段），确认失败发生在 lint/预检、镜像构建还是下游架构 job。
+2. 在日志中检索关键词：`check_package_license`、`Copyright`、`SPDX`（验证候选 A）。
+3. 验证上游 `https://github.com/RosettaCommons/rosetta.git` 是否存在分支/标签 `v3.15-dev62280`（验证候选 B）。
+4. 确认 PyRosetta `build.py` 对该版本实际需要的构建工具链（是否需 `scons` 等），核对 `dnf install` 列表（验证候选 C）。
+5. 确认 `HPC/pyrosetta/meta.yml` 新增条目与 `image-list.yml`、目录层级校验一致（验证候选 D）。
 
-1. **获取失败 job 的完整 `ci.logs`**：需确认失败具体发生在哪个 job（trigger/编排层 job 还是架构专属构建 job，如 `x86-64`、`aarch64`）。
-2. **确认失败阶段**：是 Docker 构建阶段、CI 预检（license/schema/appstore 路径）阶段，还是编排/后处理阶段（对照模式39 `eulerpublisher` infra-error）。
-3. **核对上游 ref 是否存在**：确认 `RosettaCommons/rosetta` 仓库中是否存在分支/标签 `v3.15-dev62280`（对应 `ARG VERSION`），以及是否存在对应的子模块。
-4. **确认两架构（amd64/arm64）是否都失败**：README/image-info 声明该镜像支持 `amd64, arm64`，需日志确认是否为架构相关问题（对照模式30/31/35）。
-5. **确认基础镜像工具链**：`openeuler/openeuler:24.03-lts-sp4` 中 GCC 版本及 `/usr/include/c++/12` 路径是否与 `--binder-llvm-options` 一致。
+## 修复验证要求（仅当修复涉及正则 patch 外部源文件时填写）
+本报告未给出任何涉及正则 patch 外部源文件的修复方向，故此项不适用。
 
-## 修复验证要求
-本报告未给出任何涉及正则 patch 外部源文件的修复方向，故不适用该项。但鉴于置信度为"低"且日志缺失，code-fixer 在采取任何修改前**必须**先取得真实失败日志并回填本报告的"直接错误"部分，否则不得提交修复。
+## 重要说明
+- 本报告为 **infra-error（证据不足）**：`ci.logs` 完全缺失，**Code Fixer 不应据此修改任何文件**。
+- 在拿到真实失败日志前，任何基于 diff 的推断（候选 A/B/C/D）均未经证据验证，不得直接实施修复。
+- 若 `ci.logs` 后续显示末尾为 `Finished: SUCCESS`，则按核心约束直接判定证据不足，需获取下游架构构建 job 日志后再分析。
