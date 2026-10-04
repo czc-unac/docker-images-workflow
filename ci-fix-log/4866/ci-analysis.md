@@ -2,58 +2,57 @@
 
 ## 基本信息
 - PR: #4866 — 【自动升级】onnxruntime容器镜像升级至1.30.0版本.
-- 失败类型: build-error（推断，未能由日志证实）
+- 失败类型: `build-error`（推测，证据不足；无法排除 `lint-error`）
 - 置信度: 低
-- 知识库匹配: 模式19（证据不足 / 无法定位根因），并与模式42（日志缺失无法定位）情形类似
-- 新模式标题: (不适用，匹配已有模式)
+- 知识库匹配: 模式19（证据不足 / 无法定位根因）
+- 新模式标题: (不适用)
 - 新模式症状关键词: (不适用)
 
 ## 根因分析
 
 ### 直接错误
-无。上下文中 `ci.logs` 明确为：
+上下文明确给出：
 
 ```
-(not available — analyze based on PR diff only)
+"ci": {
+  "run_info": "(not available)",
+  "logs": "(not available — analyze based on PR diff only)"
+}
 ```
 
-`ci.run_info` 同样为 `(not available)`。因此**没有可引用的失败日志**，无法复制任何关键错误信息，也无法执行"日志与状态一致性"前置检查（既无 `Finished: SUCCESS`，也无 `Finished: FAILURE`）。
+本次 **完全没有提供 `ci.logs`**，因此不存在可引用的第一条/关键错误信息。以下所有判断均为基于 `pr.diff` 的**推断**，不构成日志证据。
 
 ### 根因定位
-- 失败位置: 未知（日志缺失）
-- 失败原因: 无法确认。缺少下游构建 job 的任何输出，无法定位首个 error。
+- 失败位置: 未知（无日志）
+- 失败原因: 无法确认。日志缺失，无法定位具体失败的文件、行号或构建步骤。
 
 ### 与 PR 变更的关联
-本 PR 为自动升级 PR，新增/修改以下文件：
-- 新增 `AI/onnxruntime/1.30.0/24.03-lts-sp4/Dockerfile`
-- 更新 `AI/onnxruntime/README.md`、`AI/onnxruntime/doc/image-info.yml`
-- 更新 `AI/onnxruntime/meta.yml`，新增条目：
-  ```yaml
-  1.30.0-oe2403sp4:
-    path: 1.30.0/24.03-lts-sp4/Dockerfile
-  ```
+PR 为自动升级类变更，主要内容：
+1. 新增 `AI/onnxruntime/1.30.0/24.03-lts-sp4/Dockerfile`（全新 63 行，多阶段构建，gcc-toolset-14 + cmake==3.28 + `git clone -b v1.30.0` + `./build.sh ... --build_wheel`）。
+2. `AI/onnxruntime/README.md`、`AI/onnxruntime/doc/image-info.yml` 新增 1.30.0 镜像行。
+3. `AI/onnxruntime/meta.yml` 新增 `1.30.0-oe2403sp4` 条目。
 
-仅凭 diff 可提出以下**待验证的候选根因**（均无日志证据支撑，不能作为结论）：
-1. **上游 tag 不存在（最可能，参考模式19/42 的自动升级同类案例）**：Dockerfile 中 `git clone --recursive -b $VERSION $ONNXRUNTIME_REPO`，其中 `ARG VERSION=v1.30.0`。若 microsoft/onnxruntime 上游不存在 `v1.30.0` tag（自动升级 PR 使用不存在版本号的历史案例，如 PR #4846 binder 0.2.0、PR #4861 lammps stable_2026.09.30），则 `git clone -b v1.30.0` 会以 `Remote branch v1.30.0 not found` 失败。
-2. **gcc-toolset-14 相关编译问题**：Dockerfile 使用 `gcc-toolset-14-*` 并建立 `libgcc_s.so.1` 软链接后 `source .../enable`，aarch64 上可能触发与模式35（x86 专属编译标志）或模式10（缺少构建依赖）类似的失败，但无日志无法判断。
-3. **`meta.yml` / `image-info.yml` 元数据一致性**：`image-info.yml` 新增条目使用 `gitee.com` 链接，而同级既有条目使用 `atomgit.com`；`meta.yml` 文件均无末行换行符。是否触发 CI 路径/一致性预检（模式11、模式29）无法确认。
+由于没有任何日志，**无法判定失败是否由本次改动触发**。仅从 diff 可观察到以下若干需在日志中验证的候选点（均为推断，非结论）：
+
+- **候选 A（对应模式17，lint-error）**：新增的 `Dockerfile` 未包含 `Copyright` 与 `SPDX-License-Identifier` 版权头。本仓库对新增文件有 `check_package_license` 预检，若该检查作用于新增文件，会直接失败。这是 diff 中**唯一可静态观察到的明确缺陷**，但无法确认该项检查是否在本次 CI 中被触发。
+- **候选 B（dependency-error）**：`pip install --no-cache-dir cmake==3.28`，需确认 PyPI `cmake` 包是否存在可满足该约束的版本。
+- **候选 C（build-error）**：`git clone --recursive -b v1.30.0`，需确认上游 `microsoft/onnxruntime` 是否确实存在 tag `v1.30.0`（自动升级 PR 引用不存在版本号是本仓库高发问题，见模式42/19）。
+- **候选 D（build-error）**：`./build.sh ... --skip_submodule_sync ... --update --build --build_wheel` 与 gcc-toolset-14 工具链、依赖包（`python3-flatbuffers`、`python3-protobuf` 等）在 24.03-lts-sp4 的可用性，均需日志确认。
 
 ## 修复方向
 
 ### 方向 1（置信度: 低）
-优先核对上游 `microsoft/onnxruntime` 是否真实存在 `v1.30.0` tag。若不存在，需将 `ARG VERSION` 修正为上游实际存在的版本/tag（与自动升级来源保持一致）。
+**先获取真实日志再定方案**。当前证据严重不足，任何针对性修复都属于猜测。应优先拉取失败 job（含下游 x86-64 / aarch64 架构专属构建 job）的日志，定位第一条真实错误后再修复。
 
-### 方向 2（置信度: 低）
-若上游 tag 存在，则需获取下游架构构建 job（x86-64 / aarch64）的日志，确认失败发生在 `yum install`、`./build.sh` 编译、还是运行时阶段，再对症处理。
+### 方向 2（置信度: 低，仅作候选）
+若后续日志确认失败发生在许可/静态预检阶段，则为新增文件补齐 `Copyright` + `SPDX-License-Identifier` 头（对应模式17）。此为 diff 中可观察到的唯一明确缺陷，但在无日志情况下不能认定为根因。
 
 ## 需要进一步确认的点
-1. **必须获取失败 job 的完整日志**：本报告缺失 `ci.logs`，无法确定失败类型、失败文件与行号。需提供真正失败的构建 job 日志（如 `/job/x86-64/...` 或 `/job/aarch64/...`）。
-2. 核实 `microsoft/onnxruntime` 上游是否存在 `v1.30.0` tag（对应 `ARG VERSION=v1.30.0` / `git clone -b $VERSION`）。
-3. 核实 `gcc-toolset-14` 在 `openeuler/openeuler:24.03-lts-sp4` 基础镜像的可用性，以及 `libgcc_s.so.1` 软链接步骤在两架构上的行为。
-4. 核实 CI 是否对 `image-info.yml` 中镜像地址（gitee vs atomgit）或 `meta.yml` 条目有一致性/路径校验。
+1. **必须获取真正的失败日志**：`ci.logs` 本次完全缺失，无法做任何有依据的根因判定。需要失败 job 的完整日志，尤其是下游架构构建 job（如 `/job/x86-64/…`、`/job/aarch64/…`）的日志。
+2. 确认上游 `microsoft/onnxruntime` 是否存在 `v1.30.0` tag（`git clone -b v1.30.0` 是否成功）。
+3. 确认 `pip install cmake==3.28` 在构建环境能否解析到可用版本。
+4. 确认 CI 是否对本 PR 的新增 `Dockerfile` 执行 `check_package_license`（即缺失版权头是否会导致失败）。
+5. 确认失败发生在构建阶段还是预检/lint 阶段（决定 `build-error` vs `lint-error` 的类型归属）。
 
 ## 修复验证要求
-本次失败**证据不足（低置信度）**，Code Fixer 在提交前必须：
-1. 取得并阅读失败构建 job 的真实日志，确认首个 error 后再改动，**不得**仅依据本报告的候选方向直接修改。
-2. 若采用"修正上游版本/tag"方向，必须先从 `microsoft/onnxruntime` 上游仓库确认目标版本 tag（`v1.30.0`）确实存在，再提交。
-3. 若涉及 `image-info.yml` / `meta.yml` 元数据改动，需比照同仓库既有同类条目（如 1.22.1/24.03-lts-sp2）的格式与链接来源保持一致。
+本次修复方向包含"补齐版权头"这一候选，但该候选置信度为低，**不得直接据此提交**。code-fixer 在动作前必须先取得失败 job 的原始日志，确认第一条真实错误；在无日志的情况下不得假设缺失版权头即为根因。
