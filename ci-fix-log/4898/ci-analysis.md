@@ -2,61 +2,72 @@
 
 ## 基本信息
 - PR: #4898 — 【自动升级】seurat容器镜像升级至5.6.0版本.
-- 失败类型: `infra-error`（实际为：证据不足，日志缺失）
+- 失败类型: build-error（证据不足，无法唯一确定）
 - 置信度: 低
 - 知识库匹配: 模式42（日志缺失无法定位）
-- 新模式标题: 镜像内容错配
-- 新模式症状关键词: seurat, pblat-cluster, Dockerfile内容与镜像名不符, 自动升级
+- 新模式标题: （不适用，匹配已有模式）
+- 新模式症状关键词: （不适用）
 
 ## 根因分析
 
 ### 直接错误
+本次上下文未提供任何有效 CI 日志：
+
 ```
-ci.run_info: "(not available)"
-ci.logs: "(not available — analyze based on PR diff only)"
+ci.run_info: (not available)
+ci.logs: (not available — analyze based on PR diff only)
 ```
 
-本次**未提供任何 CI 日志与运行信息**，无法从日志中提取第一条真实错误。
-
-### 前置检查（日志与状态一致性）
-- 日志中**不存在** `Finished: SUCCESS` / `Build successful` 成功标志；
-- 但同时也**根本没有任何日志内容**，因此无法判断失败发生在 trigger/编排层还是下游架构构建 job（`/job/x86-64/…`、`/job/aarch64/…`），也无法判断真实错误类型。
-
-结论：**证据不足**，无法定位具体失败点。
+因此**不存在可用于定位根因的错误行**。核心约束规定：日志不足以确定根因时必须判定为"证据不足"。以下所有内容均为基于 `pr.diff` 的**可疑点假设**，未经日志验证，不构成确定结论。
 
 ### 根因定位
-- 失败位置: 未知（日志缺失）
-- 失败原因: 无法确认。仅凭 diff 无法判定 CI 究竟因何失败。
+- 失败位置: 未知（无日志）
+- 失败原因: 无法确认。日志缺失，无法判断失败发生在构建、预检（license/metadata 校验）还是下游架构任务中。
 
-### 与 PR 变更的关联（diff 层面的重大异常）
-对 `pr.diff` 逐项核对时发现一处强烈异常，虽不能直接证明它是本次 CI 失败原因，但极可能是本 PR 的核心缺陷：
+### 与 PR 变更的关联
+PR 新增/修改了 4 处内容：
+1. 新增 `HPC/seurat/5.6.0/24.03-lts-sp4/Dockerfile`（新文件，19 行）
+2. `HPC/seurat/README.md` 增加 5.6.0 行
+3. `HPC/seurat/doc/image-info.yml` 增加 5.6.0 行
+4. `HPC/seurat/meta.yml` 增加 `5.6.0-oe2403sp4` 条目
 
-新增文件 `HPC/seurat/5.6.0/24.03-lts-sp4/Dockerfile` 的**内容与镜像名完全不符**：
+**可疑点 A（架构硬编码，build-error 假设，中低置信度）**：
+新增 Dockerfile 中 sed 替换无条件把 `x86_64` 改成 `aarch64`：
+```
+sed -i 's/MACHTYPE=x86_64/MACHTYPE=aarch64/g' Makefile
+sed -i 's/x86_64/aarch64/g' htslib/Makefile
+```
+而 README/image-info 声明该镜像支持 `amd64, arm64`。若 CI 在 amd64 runner 上构建同一 Dockerfile，上述替换会把 x86_64 平台的构建配置强制改成 aarch64，极可能导致 x86_64 构建失败。**但无日志佐证，仅为假设。**
 
-- PR 标题、`HPC/seurat/README.md`、`HPC/seurat/doc/image-info.yml`、`HPC/seurat/meta.yml` 均将该条目声明为 **Seurat 5.6.0**；
-- 但 Dockerfile 实际内容是构建 **pblat-cluster**：
-  - `ARG VERSION=1.1`（与 seurat 5.6.0 不匹配）；
-  - `git clone -b ${VERSION} https://github.com/icebert/pblat-cluster.git /pblat-cluster`；
-  - 安装 `git gcc gcc-c++ make which zlib-devel openssl-devel openmpi-devel`，最后 `cp pblat-cluster /usr/bin/pblat`。
-- 这与 Seurat（R 语言单细胞分析包，通常经 R/CRAN 安装）毫无关系，明显是把**另一个镜像的构建内容误写入了 seurat 路径**。
+**可疑点 B（语义内容与标题不符）**：
+PR 标题为"seurat 升级至 5.6.0"，但新增 Dockerfile 实际构建的是 `icebert/pblat-cluster`（`ARG VERSION=1.1`，`cp pblat-cluster /usr/bin/pblat`）。即 seurat 的路径下放入的是 pblat-cluster 的构建脚本。这是自动升级单的明显内容错配，但 CI 是否对该语义做校验未知，无法据此断定失败。
 
-此外该 Dockerfile 还存在可疑点（在无日志时不能确认是否为直接原因）：
-- 硬编码 aarch64 的 sed：`sed -i 's/x86_64/aarch64/g' htslib/Makefile`，在 amd64 构建上会构造错误架构；
-- `ENV PATH=/usr/lib64/openmpi/bin:$PATH` 自引用未定义变量（模式20 特征）。
+**可疑点 C（license 头缺失，lint-error 假设，中低置信度）**：
+新增 Dockerfile 直接从 `ARG BASE=...` 开始，未包含项目要求的 Copyright + SPDX 头（参考模式17 `check_package_license`）。若 CI 对此新文件执行 license 检查，会判定失败。同样无日志佐证。
 
 ## 修复方向
 
-### 方向 1（置信度: 中）
-核对 `HPC/seurat/5.6.0/24.03-lts-sp4/Dockerfile` 的预期内容：当前文件内容是 pblat-cluster 构建脚本，与“seurat 5.6.0 升级”不符，判断为自动升级流程写入了错误的 Dockerfile 内容。应使用与其它 seurat 版本（如 5.5.0/5.5.1）一致的 Seurat 安装逻辑重写该文件，并同步确认 `ARG VERSION` 指向正确的 seurat 版本。
+> 因日志缺失，以下均为待验证的排查方向，**不构成确定结论**。
 
-### 方向 2（置信度: 低）
-若该 Dockerfile 内容确为预期，则需获取真实日志后定位 pblat-cluster 构建失败点，例如上游 `icebert/pblat-cluster` 是否存在 tag `1.1`（diff 中 `ARG VERSION=1.1`）、`make` 是否因架构 sed 或 `-fcommon` 补丁失败等。
+### 方向 1（置信度: 低）— 获取失败 job 日志
+确认真正失败的 job 与步骤（预检/架构构建/推送）。在拿到日志前，不应据 PR diff 假定根因。
+
+### 方向 2（置信度: 中低）— 校验新增 Dockerfile 的架构处理
+检查 sed 对 `x86_64/aarch64` 的硬编码替换是否导致 amd64 构建失败；若确实如此，应按目标架构做条件分支（仅推测，无日志确认）。
+
+### 方向 3（置信度: 中低）— 校验新文件 license 头
+检查 `check_package_license` 是否为该新增 Dockerfile 的失败来源。
 
 ## 需要进一步确认的点
-1. **获取真实 CI 日志**：trigger 层日志，以及下游架构构建 job（`/job/x86-64/…`、`/job/aarch64/…`）的日志，才能确定真正的失败类型与第一条错误。
-2. 确认 `HPC/seurat/5.6.0/24.03-lts-sp4/Dockerfile` 期望内容是否应为 Seurat 安装（对照 5.5.0 / 5.5.1 版本），当前 pblat-cluster 内容是否为误写入。
-3. 确认上游 `icebert/pblat-cluster` 仓库是否存在 tag/branch `1.1`。
-4. 确认 CI 是否按元数据（`meta.yml`）调度到 amd64 与 arm64 两个架构，以及是否因硬编码 aarch64 的 sed 在 amd64 上产生失败。
+1. **失败 job 的真实日志**：本次仅提供 PR diff，无 `ci.logs`。需提供失败 job（预检、x86-64、aarch64、推送等）的完整日志才能定位根因。
+2. **失败类型归属**：无法区分是 build-error、lint-error（license/metadata 校验）还是 infra-error。
+3. **CI 是否校验 Dockerfile 内容与镜像名的一致性**：即 pblat-cluster 内容放在 seurat 路径下是否会被 CI 拦截。
+4. **meta.yml / image-info.yml 的一致性校验是否触发**：新增 5.6.0 条目是否满足项目的路径与 schema 规范（本次无法读取仓库文件验证）。
+5. **amd64 架构构建是否确实因 sed 硬编码 aarch64 而失败**：需 x86-64 job 日志确认。
 
 ## 修复验证要求
-（本次修复方向不涉及“修改正则匹配第三方源文件”，无需执行正则验证。但 Code Fixer 在改动前必须先获得真实 CI 日志，或至少核对 seurat 5.5.x 既有 Dockerfile 的实际构建方式，不能仅凭本报告假设内容错配一定成立。）
+本次分析置信度为"低"，且失败日志完全缺失。**code-fixer 在收到本报告后不得直接依据 diff 假设提交修复**，必须：
+1. 先取得失败 job 的真实 `ci.logs`（尤其是下游架构构建 job），确认第一条 error。
+2. 若确认失败源于 sed 架构硬编码，需分别验证 amd64 与 aarch64 目标下替换结果是否符合上游 Makefile 预期。
+3. 若确认失败源于 license 头缺失，需比对仓库内同类（如 `HPC/seurat/5.5.1/.../Dockerfile`）既有文件的头部格式后再补充。
+4. 本报告不涉及正则匹配第三方源文件的修复，故无 getdeps fetcher.py 类验证要求。
