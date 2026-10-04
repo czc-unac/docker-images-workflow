@@ -2,49 +2,53 @@
 
 ## 基本信息
 - PR: #4908 — 【自动升级】e2b容器镜像升级至2.52.0版本.
-- 失败类型: 未确定（证据不足；候选类型 `dependency-error`）
+- 失败类型: infra-error
 - 置信度: 低
-- 知识库匹配: 模式42（日志缺失无法定位）/ 模式19（证据不足）
-- 新模式标题: (不适用，匹配已有模式)
-- 新模式症状关键词: (不适用)
+- 知识库匹配: 模式42
+- 新模式标题: (无，命中已有模式)
+- 新模式症状关键词: (无，命中已有模式)
 
 ## 根因分析
 
 ### 直接错误
 ```
-ci.run_info: (not available)
-ci.logs: (not available — analyze based on PR diff only)
+(无可用日志)
 ```
-本次上下文**未提供任何 CI 日志**，无法获取失败 job 的报错信息，因此无法定位最早出现的错误。
+
+上下文中的 `ci.logs` 为 `"(not available — analyze based on PR diff only)"`，`ci.run_info` 为 `"(not available)"`。
+本次分析无任何 CI 运行日志可供定位真实报错，无法抄录最早出现的错误信息。
 
 ### 根因定位
-- 失败位置: 未知（无日志）
-- 失败原因: 无法确认。仅凭 PR diff 无法判断失败发生在构建、元数据预检还是下游架构 job。
+- 失败位置: 未知（CI 日志未提供）
+- 失败原因: 无法确认。日志缺失，无法判断失败发生在哪个 job、哪个阶段、哪一行。
 
 ### 与 PR 变更的关联
-本次 PR 为自动升级，新增/修改内容如下：
-- 新增 `Cloud/e2b/2.52.0/24.03-lts-sp4/Dockerfile`：`pip3 install "e2b==${VERSION}"`（`VERSION=2.52.0`），源为阿里云 PyPI 镜像。
-- `Cloud/e2b/README.md`、`Cloud/e2b/doc/image-info.yml`：新增 `2.52.0-oe2403sp4` 条目。
-- `Cloud/e2b/meta.yml`：新增 `2.52.0-oe2403sp4` 条目。
+PR #4908 为自动升级单，改动内容为：
+- 新增 `Cloud/e2b/2.52.0/24.03-lts-sp4/Dockerfile`（`pip3 install "e2b==${VERSION}"`，`VERSION=2.52.0`）
+- `Cloud/e2b/README.md` 新增 `2.52.0-oe2403sp4` 条目
+- `Cloud/e2b/doc/image-info.yml` 新增 `2.52.0-oe2403sp4` 条目
+- `Cloud/e2b/meta.yml` 新增 `2.52.0-oe2403sp4` 条目
 
-潜在可疑点（**均未经日志验证，不得作为结论**）：
-1. `e2b==2.52.0` 若在 PyPI 尚未发布，pip 解析会失败（对应模式02/模式42“自动升级指向不存在版本”）。
-2. `meta.yml` diff 显示新增前后 `2.51.0-oe2403sp4` 出现**重复 key**（原文件即存在，本次未修复），理论上可能触发 YAML/元数据校验异常（模式11），但该重复并非本 PR 引入。
-3. 新增 Dockerfile 未见 Copyright / SPDX-License-Identifier 头，理论上可能触发 `check_package_license`（模式17）。
-
-以上仅为 diff 层面的可疑点，无日志佐证，不能判定为根因。
+**无法确认**本次失败是否由上述改动触发。日志缺失，无法建立 PR 变更与失败之间的因果链。
 
 ## 修复方向
 
 ### 方向 1（置信度: 低）
-先获取真正的失败 job 日志，再据此定位。若日志证实为“上游 2.52.0 版本不存在”，则属依赖/版本类失败；若为元数据校验失败，则应检查 `meta.yml` 的重复 key。**在拿到日志前不应盲目修改。**
+无法给出可靠修复方向。需先获取真实失败日志后再定位。
+从 diff 静态观察到的**待验证**风险点（均不可作为根因结论）：
+- 新增的 Dockerfile 未包含 Copyright / SPDX-License-Identifier 版权头，可能触发模式17 的 `check_package_license` 检查（需日志确认）。
+- `meta.yml` 在改动前后均存在重复的 `2.51.0-oe2403sp4` 键，新增 `2.52.0-oe2403sp4` 键；若 CI 预检对重复键敏感，可能触发模式11 类元数据校验失败（需日志确认）。
+- `pip3 install "e2b==2.52.0"` 的版本是否真实存在于上游 PyPI，需核实（对应模式02/19 类"版本不存在"风险，需日志确认）。
 
 ## 需要进一步确认的点
-1. 需要失败 job 的完整 `ci.logs`（构建 job，而不仅是 trigger/编排层），特别关注是否出现 `Finished: SUCCESS` 而 PR 仍失败的情况。
-2. 若存在下游架构 job（如 `/job/x86-64/…`、`/job/aarch64/…`），需获取其日志——失败很可能发生在未提供的下游构建 job 中。
-3. 确认 PyPI（`mirrors.aliyun.com/pypi/simple/`）上 `e2b` 是否存在 `2.52.0` 发行版。
-4. 确认 CI 在失败 job 中是否报 `check_package_license`（若命中模式17，需为新增 Dockerfile 补充 Copyright/SPDX 头）。
-5. 确认 `Cloud/e2b/meta.yml` 中 `2.51.0-oe2403sp4` 重复 key 是否被 CI 元数据校验拒绝。
+1. 失败 job 的完整日志（trigger/编排层之外的**下游架构构建 job**，如 `/job/x86-64/…`、`/job/aarch64/…`）。
+2. `ci.run_info`：workflow 名称、失败 stage、失败 job 名。
+3. 若是构建阶段失败：`pip3 install e2b==2.52.0` 的实际 pip 报错（版本是否存在、Python 版本约束）。
+4. 若为预检阶段失败：`meta.yml` / `doc/image-info.yml` / `README.md` 的校验输出，以及版权头检查结果。
+5. `Cloud/e2b/2.52.0/24.03-lts-sp4/Dockerfile` 与历史相邻版本 Dockerfile 的差异比对。
 
 ## 修复验证要求
-不适用：本次修复方向不涉及正则 patch 外部源文件；且因证据不足，code-fixer 在获得失败日志前不应提交任何修复。
+当前置信度为"低"，且证据不足，code-fixer 不得基于本报告直接提交修复。必须按以下步骤先取得证据：
+1. 获取下游架构构建 job（x86-64 / aarch64）的真实日志，确认失败阶段与首条 error。
+2. 确认失败确实是本 PR 引入（而非基线已有问题）后，再依据日志给出的具体错误选择修复方向。
+3. 若日志最终仍不可得，则**不得**修改任何文件；应将本单标记为证据不足/基础设施问题（infra-error）转人工处理。
