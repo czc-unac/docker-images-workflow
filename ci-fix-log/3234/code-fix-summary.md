@@ -1,31 +1,54 @@
 # 修复摘要
 
 ## 修复的问题
-本次 CI 失败为 EulerPublisher（上游 CI 工具）发布规范预检的**误报**，不是本仓库代码问题；未对源码做任何修改。
+经核实，本次 CI 失败属于 EulerPublisher 侧 appstore 规范校验工具对「仅修改仓库根 `README.md` 的纯文档 PR」的**误判（工具缺陷 / infra 类问题）**，与本次文档改动内容无关；**本仓库无需、也无法通过修改 `README.md` 修复**，故未做代码修改。
 
 ## 修改的文件
-- 无（未修改任何文件）
+- 无（未修改任何文件，包括 `README.md`）
 
 ## 修复逻辑
-已从上游仓库获取并核对实际源文件，确认根因位于 EulerPublisher 的 `update/container/app/format.py`：
+### 1. 已定位到失败的确切代码路径
+通过 gitee 上游仓库获取到 CI 实际执行的校验脚本：
 
-1. `check_report()` 遍历变更文件时，用 `change_file.split("/")[-1].split(".")[0]` 取文件类型。对根目录 `README.md`，得到 `README`，而 `README` 正是 `DOC_FILES_PATH_FORMAT` 的合法键，因此**没有被跳过**。
-2. 随后调用 `parse_image_prefix("README.md")`。该函数中 `contents = ["README.md"]`，`len(contents) == 1` 时直接 `return "", ""`，于是前缀 `prefix = ""`。
-3. `_check_all_file_paths()` 用 `DOC_FILES_PATH_FORMAT["README"].format(prefix, ...)` 计算正确路径，得 `"" + "/README.md" = "/README.md"`。
-4. `os.path.exists("/README.md")` 在文件系统根目录下为 False，于是报出 `[Path Error] The expected path should be /README.md`，预检 `fail_count` 增加，`check_code()` 返回 1，流水线失败。
+- `eulerpublisher/update/container/app/update.py`（`check_code()` -> `format.check_report(self.change_files)`）
+- `eulerpublisher/update/container/app/format.py`（路径校验实现）
 
-这与 CI 日志完全一致：
+### 2. 复现并确认根因（工具缺陷）
+本次 PR 的变更文件清单为 `["README.md"]`。`format.check_report()` 的处理链路如下：
+
+1. `file_type = change_file.split("/")[-1].split(".")[0]` -> `"README"`，命中 `DOC_FILES_PATH_FORMAT`（`"README": "{0}/README.md"`），因此进入路径校验；
+2. `parse_image_prefix("README.md")`：由于路径只有一段（`len(contents) == 1`），直接返回 `("", "")`，即 `prefix = ""`；
+3. `_check_all_file_paths()` 中：
+   ```python
+   correct_path = DOC_FILES_PATH_FORMAT[type].format(prefix, contents[-1])
+   # => "{0}/README.md".format("", "README.md") => "/README.md"
+   if not os.path.exists(correct_path):
+       return False, f"[Path Error] The expected path should be {correct_path}"
+   ```
+   即把「仓库根目录的 `README.md`」拼成了**文件系统绝对路径 `/README.md`**，随后 `os.path.exists("/README.md")` 必然为 `False`，从而抛出 `[Path Error] The expected path should be /README.md`，并在 `update.py` 中聚合为 `specification errors for releasing on appstore` 导致构建失败。
+
+本地验证结果：
 ```
-Difference: [ "README.md" ]
-| README.md | [Path Error] The expected path should be /README.md | FAILURE |
+root /README.md exists: False
+cwd README.md exists:  True
+correct_path: '/README.md'
 ```
+即该校验对**任何修改仓库根 `README.md` 的 PR**都会无条件失败，与被修改的文档内容完全无关（校验只使用 Gitee 返回的文件名，不读取文件内容）。
 
-**已从上游 master 分支获取 `update/container/app/update.py` 与 `update/container/app/format.py` 验证**，并用 Python 复现了上述路径计算（`prefix=''` → `correct_path='/README.md'` → `exists=False`）。
+### 3. 为何不能在本 PR 内修复
+- 该校验逻辑位于上游工具 `eulerpublisher`，不在本仓库，且不在本 PR 的 `changed_files=["README.md"]` 允许修改范围内；
+- 失败由**文件名**触发，修改 `README.md` 的内容无法让 `os.path.exists("/README.md")` 成立；
+- 将说明迁移到 `README.en.md` 同样会命中 `file_type == "README"` 的同一缺陷，且新增/变更其他文件超出本次允许范围；
+- 因此不存在任何「只改 `README.md`」的修复方案。按分析报告要求，不应在根因未指向文档内容的情况下对文档做无依据的删改。
 
-### 为什么无需在本仓库改代码
-- 该判定只依赖**文件路径**，与 `README.md` 的内容无关。只要 PR 修改仓库根目录的 `README.md`，无论内容如何，都会被同一逻辑判为 `/README.md` 不存在而失败。因此在本仓库内无法通过修改 `README.md` 内容规避。
-- 分析报告“方向 1”（把内容移到其他文档位置）需要新增文件，而任务约束明确**禁止创建任何新文件**，且只允许修改 `pr.changed_files` 内的 `README.md`，方案不可行；同时把内容挪走也不属于对失败根因的修复。
-- 真正应有的修复在上游工具 `eulerpublisher/update/container/app/format.py`：当 `parse_image_prefix()` 返回空前缀（即文件不在任何镜像最小目录内）时，应跳过路径校验；或仅在前缀非空时才把 `README` 等文档类型计入预检。这属于 CI 工具/基础设施问题，按任务约定 Code Fixer 不强行改代码，建议联系 CI 运维（Infra SIG / EulerPublisher 维护者）修正该预检逻辑。
+### 4. 结论与建议（供人工/上游处理）
+- 这是 `eulerpublisher/update/container/app/format.py` 的缺陷：`parse_image_prefix()` 对仓库根级文件返回空前缀后，`_check_all_file_paths()` 未跳过空前缀，误拼出绝对路径 `/README.md`。
+- 建议的上游修复方向（不在本仓库、本次不实施）：在校验前跳过 `prefix == ""` 的仓库根级文件，或对根级 `README.md`/`README.en.md` 做白名单豁免。
+- 本 PR 的文档改动本身符合项目规范，无需修改。
 
 ## 潜在风险
-无。本次未做任何代码改动，不影响仓库任意功能。后续 PR 若仍需修改根目录 `README.md`，在该上游预检 bug 修复前仍会复现同类失败。
+无（本次未对仓库任何文件做改动，不存在引入新问题的风险）。
+
+## 备注
+- 分析报告将置信度定为「中」并要求先确认校验工具对 `README.md` 路径的期望语义。本报告已通过阅读上游实际校验源码完成确认：期望路径 `/README.md` 系空前缀拼接产生的错误绝对路径，并非项目规范要求的真实落盘位置。
+- 已从上游 gitee 仓库成功获取 `update/container/app/update.py` 与 `update/container/app/format.py` 的实际源码（AtomGit 迁移，gitee raw 仍可访问），并据此完成逻辑复现与本地验证。注意：CI 日志中的行号（`update.py:356`、`:273`）与本地上游 master 版本行号略有偏移，属版本差异，不影响上述根因判定。
