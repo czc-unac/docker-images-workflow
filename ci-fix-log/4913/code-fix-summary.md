@@ -1,24 +1,21 @@
 # 修复摘要
 
 ## 修复的问题
-无需代码修复：CI 失败分析报告判定失败类型为 `infra-error`（证据不足），未提供任何 CI 日志，无法定位根因，不应据此强行修改代码。
+无需代码修改：CI 失败分析报告判定本次失败类型为 `infra-error`（证据不足，无法定位真实错误），报告明确要求在有真实失败日志之前不得修改代码。
 
 ## 修改的文件
-- 无
+- 无（未修改任何文件）
 
 ## 修复逻辑
-CI 失败分析报告明确说明：
+CI 失败分析报告显示：
 
-- `ci.logs` 与 `ci.run_info` 均为 `(not available)`，日志完全缺失，无法定位"最早出现的 error"、失败文件/行号或失败函数。
-- 失败类型标记为 `infra-error`，置信度低，属于"日志不足以确定根因"的情形。
-- 报告中的"修复方向"（上游 tag `v1.30.0` 是否存在、gcc-toolset-14 等包是否可用）均被明确标注为**待验证假设**，且报告要求"在取得失败日志并确认根因前，禁止 Code Fixer 依据本报告的假设直接提交修改"。
+- 失败类型为 `infra-error`，置信度低；
+- 上下文 `ci.logs` 字段标注为 `(not available — analyze based on PR diff only)`，`ci.run_info` 同样为 `(not available)`，即没有任何失败 job 的日志；
+- 报告结论明确："在获取真实日志前，code-fixer 不得基于本报告执行任何修改；应等待失败 job 日志补齐后再行定位"。
 
-根据工作流程约束："如果分析报告指出是 `infra-error`（CI 基础设施问题），在 output_file 中说明无需代码修改，不要强行改代码。"因此本次不做任何源码改动。
+因此本次不做任何代码改动。所涉文件（`AI/onnxruntime/1.30.0/24.03-lts-sp4/Dockerfile`、`AI/onnxruntime/README.md`、`AI/onnxruntime/doc/image-info.yml`、`AI/onnxruntime/meta.yml`）仅经只读核对，未发现与失败直接相关的确定性错误，也缺少日志支撑，故遵循最小化原则不进行任何猜测性修改。
 
-本 PR 涉及的文件（`AI/onnxruntime/1.30.0/24.03-lts-sp4/Dockerfile`、`README.md`、`doc/image-info.yml`、`meta.yml`）保持原样。
+建议后续补充失败 job（x86-64 / aarch64 / 预检）的完整日志后重新分析，重点核对：上游 onnxruntime 是否真实存在 tag `v1.30.0`、`gcc-toolset-14` 包在 `openeuler:24.03-lts-sp4` 源中的可用性、`./build.sh` 产物路径与 `COPY --from=builder` 是否一致、以及元数据/许可证预检规范。
 
 ## 潜在风险
-无（未修改任何文件，不影响任何功能）。
-
-## 后续建议
-需要重新获取真实的 CI 失败日志（尤其是实际执行 Docker 构建的 x86-64 / aarch64 架构 job 及 trigger/编排层 job）后，再重新触发分析流程。若确认是 CI 基础设施问题，则无需代码修复。
+无（未修改任何代码，不会影响任何功能）。
