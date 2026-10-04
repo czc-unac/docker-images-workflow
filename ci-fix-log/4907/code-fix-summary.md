@@ -1,31 +1,37 @@
 # 修复摘要
 
 ## 修复的问题
-LAMMPS 自动升级 Dockerfile 使用了上游不存在的版本 tag（`stable_2026.09.30`，`wget` 404），已将其修正为上游真实存在的 tag `stable_30Sep2026`，使镜像构建能够正常下载源码。
+本 PR 的真实根因（Dockerfile 使用上游不存在的 tag `stable_2026.09.30`）已在上一轮修复中修正为上游真实存在的 tag `stable_30Sep2026`；本轮核查确认当前代码正确，**无需新增代码修改**。当前 fix 分支的 x86_64 CI 失败属于基础设施错误（拉取 `build.sh` 时 HTTP 429 限流），与代码无关。
 
 ## 修改的文件
-- `HPC/lammps/2026.09.30/24.03-lts-sp4/Dockerfile`: 将 `ARG VERSION=2026.09.30` 改为 `ARG VERSION=30Sep2026`。该变量同时驱动源码包名、下载 URL（`stable_${VERSION}.tar.gz`）与解压后的工作目录，改一处即可全链路修正。
-- `HPC/lammps/README.md`、`HPC/lammps/doc/image-info.yml`、`HPC/lammps/meta.yml`: 经核查，无需修改（见"修复逻辑"）。
+- `HPC/lammps/2026.09.30/24.03-lts-sp4/Dockerfile`: 无新增修改。当前第 4 行已是 `ARG VERSION=30Sep2026`（由上一轮修复提交 `dcb359ef2` 完成）。
+- `HPC/lammps/README.md`、`HPC/lammps/doc/image-info.yml`、`HPC/lammps/meta.yml`: 无需修改，四处版本条目与目录/镜像 tag `2026.09.30-oe2403sp4` 保持一致。
 
 ## 修复逻辑
-对应分析报告"方向 1"，根因为下载 URL 404：
+本报告中的 CI 分析为“日志缺失、置信度低”的旧分析，且引用的 `ARG VERSION=2026.09.30` 在当前分支已不存在。为保证结论确定性，本轮直接做了两级证据核查：
 
-1. **上游 tag 验证（已完成）**：通过 GitHub API 获取 `lammps/lammps` tag 列表并实测下载：
-   - `https://github.com/lammps/lammps/archive/refs/tags/stable_30Sep2026.tar.gz` → **HTTP 200**（实际下载 178,883,256 字节，tag 提交日期 2026-09-30）
-   - `https://github.com/lammps/lammps/archive/refs/tags/stable_2026.09.30.tar.gz` → **HTTP 404**
-   - 对比既有可用 tag `stable_22Jul2025` → HTTP 200。
-   结论：LAMMPS 稳定版 tag 采用 `stable_<DDMonYYYY>` 命名，原 `2026.09.30`（自动升级工具按 `version_scheme: RPM` 解析出的日期形式）并不存在，必须改为 `30Sep2026`。
+1. **上游 tag 确定性验证（已完成）**
+   - `https://github.com/lammps/lammps/archive/refs/tags/stable_2026.09.30.tar.gz` → **HTTP 404**（不存在）
+   - `https://github.com/lammps/lammps/archive/refs/tags/stable_30Sep2026.tar.gz` → **HTTP 200**，下载得到有效 gzip 包（178,883,256 字节）
+   - 解压顶层目录为 `lammps-stable_30Sep2026`，与 `WORKDIR /opt/lammps-stable_${VERSION}` 一致；`examples/melt/in.melt`、`src/Makefile` 均存在。
+   - 结论：LAMMPS stable tag 采用 `stable_<DDMonYYYY>`，`2026.09.30` 是自动升级工具按 `version_scheme: RPM` 规范化出的日期形式，并非上游真实 tag。当前 `ARG VERSION=30Sep2026` 已指向真实 tag，Dockerfile 修复正确。
 
-2. **构建链路复核（方向 2 排除）**：对 `stable_30Sep2026` 验证构建依赖同样存在（均 HTTP 200）：
-   - `src/MAKE/Makefile.mpi`、`src/Makefile`、`examples/melt/in.melt`，即 `RUN make mpi` 与 `cp examples/melt/in.melt src/` 可正常执行，故排除 MPI/构建依赖问题。
+2. **当前 fix 分支 CI 失败定性：infra-error（已从真实日志确认）**
+   - 通过 GitCode API 定位到修复 PR #4918（head `fix/4907`）的门禁结果：**x86_64 FAILED / aarch64 SUCCESS**。
+   - 从门禁日志服务拉取 x86_64 失败构建 #5037 的真实控制台日志，失败原因是：
+     ```
+     curl: (22) The requested URL returned error: 429
+     chmod: cannot access 'build.sh': No such file or directory
+     ./build.sh: No such file or directory
+     Build step 'Execute shell' marked build as failure
+     ```
+   - 该构建 `durationMs=1277`（约 1.3 秒），构建根本未开始；对照成功的构建 #4985 `durationMs≈6,643,487`（约 110 分钟）。这是 Jenkins 拉取构建脚本被限流（HTTP 429）的临时性基础设施故障，与仓库代码无关。
 
-3. **元数据一致性复核**：`meta.yml` / `README.md` / `doc/image-info.yml` 中的镜像 tag 与目录路径 `2026.09.30/24.03-lts-sp4/Dockerfile` 保持一致（与 PR 目录命名相符），且 `meta.yml` 的 path 必须指向真实存在的 Dockerfile。由于约束限制不可新增/重命名文件，目录无法改为 `30Sep2026`，因此保持元数据与目录一致、仅修正 Dockerfile 中的上游下载 tag，是最小且不引入新问题的修复。`HPC/image-list.yml` 已存在 `lammps: lammps` 条目，无需补充。
+3. **同类先例佐证**
+   - 完全相同的补丁（Dockerfile blob `e211599c`，四个文件 blob 完全一致）在 PR #4872（fix #4861）的 x86_64 与 aarch64 均 **ci_successful**。
+   - 说明 `stable_30Sep2026` 这一修复本身可通过门禁，PR #4918 的 x86_64 失败为可重试的偶发限流，不是代码问题。
 
-4. **其他疑点排除**：
-   - 模式17（Copyright/SPDX 头）：仓库中 0/429 个 README.md、0/268 个 HPC Dockerfile 含 SPDX 头，且同目录既有 `22Jul2025`、`29Aug2024` 文件均无该头并通过 CI，故该检查不适用于本目录，未添加。
-   - YAML 合法性：`meta.yml`、`image-info.yml` 结构与既有版本条目一致，无格式错误。
-
-5. **知识库佐证**：`docs/ci-failure-patterns.md` 模式42 已记录同一路径/同一版本的历史案例 PR #4861（"使用了不存在的上游 tag `stable_2026.09.30`，导致 Dockerfile 构建失败"），与本次修复方向一致。
+综上：根因修复已到位且经上游实测 + 同补丁历史通过记录双重验证；本次 CI 失败为 infra-error，按约束**不强行改代码**，重跑门禁即可。
 
 ## 潜在风险
-无。修改仅涉及 Dockerfile 中的版本变量，不改变构建步骤、依赖与目录结构；修正后的 tag 已实测可下载。元数据/目录仍沿用 PR 的 `2026.09.30` 命名，与既有结构一致。若后续自动升级工具仍按 `version_scheme: RPM` 生成 ISO 日期形式版本号，同类问题可能再次出现，但这属于升级工具侧问题，超出本 PR 的修复范围。
+无。当前分支未做任何新增改动；对外的镜像 tag 仍为 `2026.09.30-oe2403sp4`，内部打包的上游版本 tag 为 `30Sep2026`（同一版本、命名格式不同），与既有 `22Jul2025` 目录沿用仓库自身命名、Dockerfile 使用精确上游 tag 的约定一致，不影响构建与运行。
