@@ -57,6 +57,7 @@ Dockerfile:12
 - PR #2659: `Database/redis/5.4.1/24.03-lts-sp3/Dockerfile` — CI 构建失败：Dockerfile 中 `ARG VERSION=5.4.1` 指定的 Redis 版本不存在（Git
 - PR #2731: `Others/mongoose/7.22/24.03-lts-sp3/Dockerfile` — Dockerfile 中 `ARG VERSION=7.22` 引用的上游 Git tag `7.22` 在 `cesa
 - PR #2938: `Others/wireshark/4.6.5/24.03-lts-sp4/Dockerfile` — 将 Wireshark 4.6.5 源码下载 URL 从主路径改为归档路径，修复 HTTP 404 错误导致的 Dock
+- PR #4891: `Others/binder/0.2.0/24.03-lts-sp4/Dockerfile` — 自动升级单将 `binder` 镜像版本写成了上游 keybinder-3.0 系列不存在的 `0.2.0`，导致下载 
 
 ---
 
