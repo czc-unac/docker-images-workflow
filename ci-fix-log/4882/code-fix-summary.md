@@ -1,20 +1,24 @@
 # 修复摘要
 
 ## 修复的问题
-将 openfoam Dockerfile 中不存在的版本 `20260907` 修正为上游真实存在的版本 `2606`，并适配 v2606 的 ThirdParty 归档扩展名。
+自动升级 PR 将 OpenFOAM 版本号误写为日期串 `20260907`（上游不存在 `v20260907` 目录），导致 Docker 构建时源码包 wget 返回 404；本次将其修正为上游真实存在的版本 `2606`，并同步修正下载文件名。
 
 ## 修改的文件
-- `HPC/openfoam/20260907/24.03-lts-sp4/Dockerfile`: `ARG VERSION=20260907` → `2606`；`ThirdParty-v${VERSION}.tgz` 的下载 URL、`tar` 解压与 `rm` 清理改为 `.tar.gz`（`OpenFOAM-v${VERSION}.tgz` 保持不变）。
-- `HPC/openfoam/README.md`: 表项 tag `20260907-oe2403sp4` → `2606-oe2403sp4`，描述 `openfoam 20260907` → `openfoam 2606`（Dockerfile 链接路径保持不变）。
-- `HPC/openfoam/doc/image-info.yml`: 同 README，tag 与描述改为 `2606-oe2403sp4` / `openfoam 2606`。
-- `HPC/openfoam/meta.yml`: 条目名 `20260907-oe2403sp4` → `2606-oe2403sp4`（`path` 保持不变，仍指向 `20260907/24.03-lts-sp4/Dockerfile`）。
+- `HPC/openfoam/20260907/24.03-lts-sp4/Dockerfile`: `ARG VERSION=20260907` → `ARG VERSION=2606`；ThirdParty 源码包扩展名由 `.tgz` 修正为上游实际发布的 `.tar.gz`（wget/tar/rm 三处同步修改）。
+- `HPC/openfoam/meta.yml`: 标签 `20260907-oe2403sp4` → `2606-oe2403sp4`（path 仍指向真实文件目录 `20260907/24.03-lts-sp4/Dockerfile`）。
+- `HPC/openfoam/README.md`: 版本标签行 `[20260907-oe2403sp4]` → `[2606-oe2403sp4]`，展示版本改为 `openfoam 2606`。
+- `HPC/openfoam/doc/image-info.yml`: 版本标签行同步由 `20260907-oe2403sp4` 修正为 `2606-oe2403sp4`，展示版本改为 `openfoam 2606`。
 
 ## 修复逻辑
-- 根因对应分析报告的模式02/模式19：自动升级 PR 使用了形似日期（2026-09-07）而非 OpenFOAM 合法的 `YYMM` 版本号，上游不存在 `v20260907`，导致 `ThirdParty-v20260907.tgz` / `OpenFOAM-v20260907.tgz` 下载 404，Docker 构建在下载阶段失败。
-- 已从上游 SourceForge（`https://sourceforge.net/projects/openfoam/files/`）核实：最新发布为 `v2606`（2026-07-30），其目录下只有 `OpenFOAM-v2606.tgz` 与 `ThirdParty-v2606.tar.gz`；实测 `ThirdParty-v2606.tgz` 返回 404，`ThirdParty-v2606.tar.gz` 与 `OpenFOAM-v2606.tgz` 返回 200。因此除修正版本号外，必须同步把 ThirdParty 的扩展名由 `.tgz` 改为 `.tar.gz`。
-- 受修复流程约束（仅暂存 `pr.changed_files` 中的既有文件，不允许新增文件），物理目录 `HPC/openfoam/20260907/` 无法重命名，故保留既有 path，仅将镜像 tag 与版本描述同步为真实的 `2606`。该做法与本项目针对同一路径的历史修复 PR #4838 完全一致（已比对为逐字节相同）。
-- 未涉及正则 patch 上游源文件。
+分析报告根因：`ARG VERSION=20260907` 使下载 URL 展开为 `.../files/v20260907/OpenFOAM-v20260907.tgz`，该路径在上游不存在，导致 404（dependency-error，知识库模式 02）。OpenFOAM 版本号为 4 位 `YYMM` 形式，`20260907`（8 位日期）不符合格式。
+
+已将版本号修正为当前上游真实发布的最新版本 `2606`，并确认扩展名差异。验证结果：
+- 通过 WebFetch 获取上游目录：`https://sourceforge.net/projects/openfoam/files/`，列表中 `v2606` 存在（更新时间 2026-07-30，为最新版本）。
+- 通过 WebFetch 获取 `https://sourceforge.net/projects/openfoam/files/v2606/`，确认文件清单为 `OpenFOAM-v2606.tgz` 与 `ThirdParty-v2606.tar.gz`（注意 ThirdParty 为 `.tar.gz`，而非旧版本沿用的 `.tgz`）。
+- 通过 curl 实际请求上游 URL：`.../v2606/OpenFOAM-v2606.tgz` 返回 HTTP 200，`.../v2606/ThirdParty-v2606.tar.gz` 返回 HTTP 200，确认修复后不再 404。
+
+因此除修正版本号外，必须将 ThirdParty 文件名由 `.tgz` 改为 `.tar.gz`，否则即使版本号正确仍会 404。
 
 ## 潜在风险
-- `meta.yml` / README / image-info 中的 tag 为 `2606-oe2403sp4`，而 Dockerfile 物理路径仍位于 `20260907/` 目录，目录名与 tag 不一致（仅命名层面）。因流程禁止重命名目录，此为可接受的最小化折衷；后续如有需要可在允许的变更范围内重命名目录。
-- 未修改 `image-info.yml` 中的 `upstream.regex: (?i)v\d{4}\b`，该正则本身可匹配 `v2606`，无需调整。
+无。改动仅涉及版本号与下载文件名，作用范围限于 `HPC/openfoam` 本次新增条目。
+说明：上游 v2606 真实目录名为 `2606`，而本 PR 新增文件目录名仍为 `20260907`；受“只允许修改 `pr.changed_files`、不允许新增文件/目录”的约束，未对目录重命名。`meta.yml`、`README.md`、`doc/image-info.yml` 中引用该文件的路径均已指向实际的 `20260907/24.03-lts-sp4/Dockerfile`，内部一致，不影响构建与链接有效性。
