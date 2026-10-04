@@ -2,71 +2,73 @@
 
 ## 基本信息
 - PR: #4917 — 【自动升级】ceph容器镜像升级至21.3.0版本.
-- 失败类型: lint-error（推断，证据不足；亦可能为 build-error）
+- 失败类型: build-error（待确认）
 - 置信度: 低
-- 知识库匹配: 模式42（日志缺失无法定位）
+- 知识库匹配: 模式19（证据不足 / 无法定位根因）
 - 新模式标题: (不适用)
 - 新模式症状关键词: (不适用)
 
 ## 根因分析
 
 ### 直接错误
-```
-ci.run_info: (not available)
-ci.logs: (not available — analyze based on PR diff only)
-```
-
-本次上下文中 **未提供任何 CI 运行信息与构建日志**，`ci.run_info` 与 `ci.logs` 均为 `(not available)`。因此无法从日志中提取"最早的错误信息"，任何根因判定都只能基于 PR diff 的静态推断。
+无可用日志。上下文中 `ci.run_info` 与 `ci.logs` 均为 `(not available)`，
+未提供任何构建输出（无 `docker build` 步骤日志、无错误堆栈、无成功/失败标志）。
+因此无法从日志中提取"最早出现的错误信息"，也无法确认失败发生在哪个构建阶段。
 
 ### 根因定位
-- 失败位置: 未知（日志缺失，无法定位到具体文件与行号）
-- 失败原因: 无法确认。日志完全缺失，无法确定 CI 失败发生在预检、构建还是运行时阶段。
-- 前置一致性检查: `ci.logs` 未出现 `Finished: SUCCESS` / `Build successful`，不满足"日志成功但 PR 失败"的 infra-error 判定条件，故不据此标注为 infra-error。
+- 失败位置: 未知（CI 日志缺失，只能基于 `pr.diff` 推断）
+- 失败原因: 无法确认。日志不足以定位具体错误。
 
 ### 与 PR 变更的关联
-PR 为自动升级，新增 `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile`、`entrypoint.sh`，并同步更新
-`Storage/ceph/README.md`、`Storage/ceph/doc/image-info.yml`、`Storage/ceph/meta.yml`。
+本次 PR 为自动升级单，新增 `Storage/ceph/21.3.0/24.03-lts-sp4/Dockerfile` 及
+`entrypoint.sh`，并更新 `meta.yml`、`README.md`、`doc/image-info.yml`。
+在仅有 diff 的前提下，代码层面存在以下**可疑点**（均需日志验证，不能作为定论）：
 
-基于 diff 可提出以下**待验证假设**（均无日志佐证，不能作为确定结论）：
+1. **上游 tag 是否存在（最可疑）**：Dockerfile 中
+   `ARG VERSION=21.3.0` + `git clone -b v${VERSION} ... https://github.com/ceph/ceph.git`。
+   若上游 `ceph/ceph` 不存在 tag `v21.3.0`，`git clone -b` 会以
+   `Remote branch v21.3.0 not found in upstream origin` / `exit code: 128` 失败
+   （对应知识库 模式22「Git 分支名构造错误」、模式02/模式19「自动升级使用上游不存在的版本」）。
+   Ceph 主版本号历史惯用 `X.2.0`（18.2、19.2、20.2），`21.3.0` 的 `.3` 段位较为反常，
+   存在自动升级工具生成不存在版本号的可能（同类案例：PR #4852 jetty 12.1.14、#4845 rabitq-library 0.5.1、#4838 openfoam 20260907）。
+2. **libnbd 依赖构建**：`git clone https://gitlab.com/nbdkit/libnbd.git` 后
+   `autoreconf -fi && ./configure && make`，若 `gnutls-devel`/`libxml2-devel` 等缺失或
+   `autoreconf` 未安装完整，会在 configure 阶段失败（知识库 模式10）。本次 diff 已包含相关
+   `-devel` 包，故该点风险较低，但仍需日志确认。
+3. **`ENV LD_LIBRARY_PATH=/usr/local/lib64:$LD_LIBRARY_PATH`** 自引用未定义变量，
+   会产生 BuildKit `UndefinedVar` **警告**（模式20）。该警告非致命，**不应**被视为根因。
+4. **运行时入口**：`entrypoint.sh` 依赖 `$BUILD_DIR/bin/*`，若构建阶段未产出对应二进制，
+   可能在 CI 的容器启动检查阶段失败（模式25）。但这属于运行阶段，与构建失败状态未必相关。
 
-- 假设 A（lint-error，对应模式17）：新增的 `Dockerfile` 与 `entrypoint.sh` 均**缺少 Copyright 与 SPDX-License-Identifier 头**（Dockerfile 首行即 `ARG BASE=...`，entrypoint.sh 首行为 `#!/bin/bash`），可能触发 CI `check_package_license` 检查失败。该检查在历史 PR #2516 中确有先例。
-- 假设 B（build-error，对应模式02/模式19）：Dockerfile 使用
-  `git clone -b v${VERSION} --recursive --depth 1 https://github.com/ceph/ceph.git`，`VERSION=21.3.0`。
-  若上游 `ceph/ceph` 不存在 `v21.3.0` 标签（该自动升级可能选中了不存在的版本号），
-  则 `git clone -b v21.3.0` 会因 `Remote branch v21.3.0 not found` 而失败（同类先例见模式19
-  的 `Others/binder/0.2.0`、`HPC/openfoam/20260907` 与模式42的 `HPC/lammps/2026.09.30`、
-  `Others/jetty/12.1.14`）。注意：`--recursive --depth 1` 与标签克隆本身兼容，问题仅在于标签是否存在。
-- 假设 C（build-error，弱）：Ceph 构建依赖复杂，`do_cmake.sh ... -DWITH_TESTS=OFF` + `ninja` 阶段
-  可能因缺失 `-devel` 依赖或 CMake 版本不满足而失败（对应模式10/模式35），但缺少日志无法确认。
-- 另注：Dockerfile 中 `ENV LD_LIBRARY_PATH=/usr/local/lib64:$LD_LIBRARY_PATH` 属模式20
-  的 `UndefinedVar` 自引用，BuildKit 仅告警，通常非致命，不足以解释 CI 失败。
+由于未提供日志，上述 1–4 均为"候选方向"而非结论。真正的根因必须由失败 job 的日志确定。
 
 ## 修复方向
 
 ### 方向 1（置信度: 低）
-补全新增文件的合规头部：为 `Dockerfile`（`#` 注释）和 `entrypoint.sh`（`#` 注释）补充
-Copyright 与 SPDX-License-Identifier；并核对 `README.md` / `doc/image-info.yml` 是否也需补充。
-依据为模式17，但**当前无日志证据，需先取得 CI 日志确认失败确实出自 `check_package_license`**。
+若失败为 `git clone -b v21.3.0` 报 `Remote branch ... not found`：确认上游
+`ceph/ceph` 是否存在对应 tag，纠正自动升级使用的版本号为上游真实发布版本
+（同时按需同步 `meta.yml` 中的 tag 目录名与文档版本描述）。
 
 ### 方向 2（置信度: 低）
-核实自动升级选定的 `21.3.0` 是否为 `ceph/ceph` 上游真实存在的 tag。
-若不存在，应改为上游实际存在的版本（参考模式19 的历史处理方式），并同步更新
-`meta.yml` / `README.md` / `doc/image-info.yml` 中的版本引用。
+若失败为 libnbd / ceph 构建阶段的依赖或编译错误：依据失败 job 日志定位缺失的
+`-devel` 包或编译参数，再补充依赖。此方向目前缺少任何日志依据，仅为备选。
+
+> 说明：本次无法确定唯一根因，方向 1、2 均未经日志验证。
 
 ## 需要进一步确认的点
-1. 取得该 PR 的完整 CI 日志（`ci.run_info` 与 `ci.logs`），确认失败阶段（预检 / 构建 / 运行时）。
-2. 若失败在 `check_package_license`：确认新文件需补齐的头部格式（模式17 示例）。
-3. 若失败在 `git clone -b v${VERSION}`：从上游 `ceph/ceph` 仓库确认是否存在 `v21.3.0` tag；
-   同时确认 `20.3.0` 旧条目所依据的真实 tag 命名规则，避免类似不存在的版本号。
-4. 若失败在 `do_cmake.sh` / `ninja`：需日志中的首次 `CMake Error` / `Could NOT find` / 编译报错，
-   才能判断具体缺失依赖。
-5. 若 PR 实际同时被调度到 aarch64 构建 job，还需关注架构相关失败（本 diff 未声明架构约束，
-   但 `meta.yml` 中该条目仅含 `path:`，未含 `arch:`；若上游仅支持部分架构需按模式30/31 处理）。
+1. 获取真正失败 job 的完整日志。README 声明该镜像 `amd64, arm64` 双架构，
+   构建通常在架构专属 job（如 `/job/x86-64/…`、`/job/aarch64/…`）中执行，
+   而 trigger/编排层 job 不一定携带真实错误。需拉取对应架构构建 job 的日志。
+2. 确认 `ci.logs` 末尾是否出现 `Finished: SUCCESS` / `Build successful`。
+   若日志实际来自 trigger 层且显示成功，而 PR 仍带 `ci_failed`，则应改判为
+   `infra-error`（证据不足），本报告结论需相应调整。
+3. 核实上游 `https://github.com/ceph/ceph` 是否存在 tag `v21.3.0`
+   （以 Dockerfile `ARG VERSION` 为准），以及 `image-info.yml` 中版本号与 tag 的映射关系。
+4. 确认是否为双架构中**单一架构**失败（例如 aarch64 专属问题），以缩小范围。
 
-## 修复验证要求
-当前置信度为"低"，修复方向不确定。code-fixer 在提交前**必须先获取下游失败 job 的完整日志**
-（预检 job、以及 `/job/x86-64/…`、`/job/aarch64/…` 等架构构建 job），据实际报错再定位修改，
-不得直接采用本报告中的任一假设。
-- 若采用方向 2（修正 `VERSION`/版本号），code-fixer 必须从上游 `ceph/ceph` 仓库拉取 tag 列表，
-  确认 `v21.3.0`（或替换后的版本）确实存在后再提交，并同步核对各元数据文件中的版本一致性。
-- 若采用方向 1（补版权头），需确认 CI 的 `check_package_license` 检查范围，避免漏补或多补。
+## 修复验证要求（仅当修复涉及正则 patch 外部源文件时填写）
+本 PR 的修复方向暂不涉及对第三方源文件的正则 patch，故不适用。
+
+---
+**结论**：证据不足。在未获取失败架构构建 job 日志前，**禁止**将本报告中的任何候选方向
+当作确定根因。修复前必须先取得真实失败日志，或先验证上游 tag `v21.3.0` 是否存在。
