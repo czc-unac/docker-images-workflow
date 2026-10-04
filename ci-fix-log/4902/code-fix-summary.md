@@ -1,28 +1,44 @@
 # 修复摘要
 
 ## 修复的问题
-无需代码修改。CI 失败分析报告判定为 `infra-error`（证据不足、无可用日志），经对报告中列出的全部候选方向逐一核验，本次 PR 的改动均正确，未发现需要修复的代码问题。
+无需代码修改。CI 失败根因为 aarch64 构建节点上克隆工具仓库 `eulerpublisher` 时的临时网络/基础设施错误（不属于本 PR 引入的代码问题）。
 
 ## 修改的文件
-- 无（未对 `pr.changed_files` 中任何文件做修改）
+- （无）未修改任何源代码文件。
 
 ## 修复逻辑
-分析报告 `ci_analysis.failed_type = infra-error`，且 `ci.logs` 与 `ci.run_info` 均为 `(not available)`，无法定位任何具体错误。按流程约束，infra-error 不做强行代码修改。为排除报告中的待验证假设，我实际核验了全部候选方向：
+分析报告本身置信度为「低」（证据不足，模式19），未给出可依据的根因。为做出准确判断，我直接拉取了 PR #4902 的真实 CI 结果与失败 job 日志，结论如下：
 
-1. **方向2（上游版本 404）— 已排除**：对 `https://dl.influxdata.com/influxdb/releases/` 发 HEAD 请求，
-   `influxdb3-core-3.12.0_linux_amd64.tar.gz` 与 `influxdb3-core-3.12.0_linux_arm64.tar.gz` 均返回 `HTTP/2 200`
-   （content-length 分别约 116.9MB / 106.3MB，last-modified 2026-10-01）。Dockerfile 中 `VERSION=3.12.0` 的下载 URL 有效。
-2. **制品内部结构/二进制名 — 已排除**：拉取并列出 tar 内容，根目录 `influxdb3-core-3.12.0/influxdb3` 确实存在，
-   与 Dockerfile 的 `tar -zxf ... --strip-components=1` 及 `ln -sf /influxdb/influxdb3 /usr/bin/influxdb3` 一致。
-3. **方向3（TARGETARCH 架构映射）— 已排除**：influxdata 制品后缀为 `amd64`/`arm64`，与 Docker 多架构 `TARGETARCH` 取值一致；
-   且与库内既有可正常工作版本（3.11.5 / 3.9.2 / 3.8.0）写法完全相同。
-4. **方向4（许可证头）— 已排除**：库内既有 influxdb Dockerfile（3.11.5、3.9.2 等）均以 `ARG BASE=...` 开头、无 Copyright/SPDX 头，
-   新增 3.12.0 文件与既有约定一致，不存在单独对该新文件强制加头的规范。
-5. **尾随换行/文件格式 — 已排除**：新增 Dockerfile 末尾与既有版本一致（无尾随换行）；`meta.yml` 追加 `3.12.0-oe2403sp4` 条目，
-   键顺序、缩进、`path` 指向均与其它条目一致，YAML 结构合法。
-6. **同步文件一致性 — 已确认**：`README.md`、`doc/image-info.yml` 新增的 3.12.0 标签行与 `meta.yml` 条目三者一致，无冲突。
+1. **真实 CI 状态**（来自 `openeuler-bot` 构建结果表 / GitCode PR 评论）：
+   - `check_package_license`: 警告（WARNING，缺失仓库级 project Copyright 声明文件，非失败项，且为仓库级既有问题）
+   - `check_sca`: SUCCESS
+   - x86_64 `check_build`: **SUCCESS**
+   - aarch64 `check_build`: **FAILED**（失败点）
 
-综上，PR 的四处改动本身正确，CI 的失败在现有证据下无法归因到本次改动，符合 `infra-error` 判定（构建日志缺失），因此不修改任何代码。
+2. **失败 job 日志**（aarch64，build #5117，`log-ci.openeuler.openatom.cn/api/build/log`）末尾：
+   ```
+   Cloning into 'eulerpublisher'...
+   error: RPC failed; curl 18 transfer closed with outstanding read data remaining
+   error: 5079 bytes of body are still expected
+   fetch-pack: unexpected disconnect while reading sideband packet
+   fatal: early EOF
+   fatal: fetch-pack: invalid index-pack output
+   Build step 'Execute shell' marked build as failure
+   ```
+   失败发生在 CI 环境准备阶段（克隆 `eulerpublisher` 工具），**尚未进入本 PR 镜像的 Docker 构建**。
+
+3. **对照 x86_64 成功日志**（build #5021，SUCCESS）确认：
+   - 成功克隆并安装 `eulerpublisher`；
+   - 成功执行 `curl ... influxdb3-core-3.12.0_linux_amd64.tar.gz`、`tar`、`ln -sf` 等全部步骤；
+   - 镜像 `influxdb:3.12.0-oe2403sp4-x86_64` 构建并推送成功。
+
+4. **对分析报告候选的逐项验证（均已排除）**：
+   - 候选 A（缺 Copyright/SPDX 头）：同目录既有 `3.11.5` Dockerfile 同样无版权头，且许可证检查仅为 WARNING，非失败项。
+   - 候选 B（上游制品 404）：`influxdb3-core-3.12.0_linux_amd64.tar.gz` 与 `..._linux_arm64.tar.gz` 均可下载（HTTP 200，`application/x-tar`），x86_64 构建实测成功。
+   - 候选 C（基础镜像缺 curl/tar）：与 `3.11.5` 一致且 x86_64 构建成功，不成立。
+   - 候选 D（`CMD` 中 `~` / 符号链接动态库）：二进制 RUNPATH 为 `$ORIGIN/python/lib`，Linux 下 `$ORIGIN` 经 `/proc/self/exe` 解析为真实路径 `/influxdb`，符号链接可用；且该 CMD 与既有 `3.11.5` 完全相同。
+
+综上，aarch64 失败是 CI 基础设施的瞬时网络故障，重跑（rerun）即可，源码无需改动。按角色约束（infra-error 不强改代码），本次不做任何修改。
 
 ## 潜在风险
-无。本次未改动代码。若后续能取得失败架构 job 的真实构建日志，可据此重新分析；本次核验已确认下载 URL、制品内容与架构后缀均无问题，可进一步支持"基础设施/日志缺失"而非代码缺陷的判断。
+无。
